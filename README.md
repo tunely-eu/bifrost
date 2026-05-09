@@ -117,6 +117,8 @@ cp bifrost/certs/server.crt bifrost/certs/ca.crt
 
 The token admits the connector. The relay certificate secures the tunnel transport. Public HTTPS for `home.example.com` is still handled by Caddy and is separate from this tunnel certificate. For real use, replace the example token with a random value such as the output of `openssl rand -hex 32`.
 
+If the relay certificate is issued by a public CA such as Let's Encrypt, mount that certificate and key on the relay instead. In that case the connector does not need a `ca.crt` mount; the Docker image falls back to the system trust store when `/certs/ca.crt` is absent.
+
 Create `bifrost/clients.json`. The `listener.path` must match the Unix socket your public reverse proxy will use:
 
 ```json
@@ -238,7 +240,7 @@ If the request fails, check these points first:
 - DNS for `relay.example.com` and `home.example.com` points at the public VM.
 - The public VM allows inbound TCP `8443`, `80`, and `443`.
 - The local host can open outbound TCP connections to `relay.example.com:8443`.
-- The local host has `ca.crt`, not `server.key`.
+- For a private or self-signed relay certificate, the local host has `ca.crt`, not `server.key`. For a public-CA relay certificate, no client CA mount is needed.
 - `BIFROST_CLIENT_TOKEN` matches the token in `bifrost/clients.json`.
 - The Caddy socket path matches `clients[].listener.path`.
 
@@ -263,7 +265,7 @@ Mount these paths when using the generated Docker configuration:
 
 - `/certs/server.crt`: server TLS certificate
 - `/certs/server.key`: server TLS private key
-- `/certs/ca.crt`: client CA certificate
+- `/certs/ca.crt`: optional client CA certificate for private or self-signed relay certificates
 - `/etc/bifrost/clients.json`: client definitions for the bundled JSON accept hook
 - `/sockets`: allowed Unix socket directory for server-side listeners
 

@@ -135,6 +135,41 @@ test_client_generates_config() {
   assert_eq "127.0.0.1:9100" "$(jq -r '.admin.listen' "$client_config")" "client admin listen"
 }
 
+test_client_omits_empty_ca_file() {
+  config_dir="$work_dir/client-system-trust-config"
+  BIFROST_GENERATED_CONFIG_DIR="$config_dir" \
+    BIFROST_CLIENT_SERVER_URL="bifrost.example.test:8443" \
+    BIFROST_CLIENT_TARGET_ADDRESS="127.0.0.1:8080" \
+    BIFROST_CLIENT_TOKEN="secret-token" \
+    BIFROST_CLIENT_TLS_CA_FILE="" \
+    run_entrypoint client
+
+  client_config="$config_dir/client.yaml"
+  [ -f "$client_config" ] || fail "client config was not generated"
+
+  assert_eq "false" "$(jq -r '.client.tls | has("ca_file")' "$client_config")" "client ca file omitted"
+  assert_eq "false" "$(jq -r '.client.tls.insecure_skip_verify' "$client_config")" "client insecure skip verify default"
+}
+
+test_client_omits_missing_default_ca_file() {
+  if [ -f /certs/ca.crt ]; then
+    echo "entrypoint-test: skipping missing default CA test because /certs/ca.crt exists" >&2
+    return
+  fi
+
+  config_dir="$work_dir/client-missing-default-ca-config"
+  BIFROST_GENERATED_CONFIG_DIR="$config_dir" \
+    BIFROST_CLIENT_SERVER_URL="bifrost.example.test:8443" \
+    BIFROST_CLIENT_TARGET_ADDRESS="127.0.0.1:8080" \
+    BIFROST_CLIENT_TOKEN="secret-token" \
+    run_entrypoint client
+
+  client_config="$config_dir/client.yaml"
+  [ -f "$client_config" ] || fail "client config was not generated"
+
+  assert_eq "false" "$(jq -r '.client.tls | has("ca_file")' "$client_config")" "missing default client ca file omitted"
+}
+
 test_explicit_config_passthrough() {
   config_dir="$work_dir/passthrough-config"
   mkdir -p "$config_dir"
@@ -183,6 +218,8 @@ test_rejects_invalid_input() {
 
 test_server_generates_config
 test_client_generates_config
+test_client_omits_empty_ca_file
+test_client_omits_missing_default_ca_file
 test_explicit_config_passthrough
 test_ctl_passthrough
 test_rejects_invalid_input

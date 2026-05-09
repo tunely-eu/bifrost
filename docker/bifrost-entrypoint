@@ -136,11 +136,18 @@ generate_client_config() {
   fi
   validate_headers_json "$headers_json"
   insecure_skip_verify="$(parse_bool BIFROST_CLIENT_TLS_INSECURE_SKIP_VERIFY "${BIFROST_CLIENT_TLS_INSECURE_SKIP_VERIFY:-false}")"
+  if [ "${BIFROST_CLIENT_TLS_CA_FILE+x}" = "x" ]; then
+    ca_file="$BIFROST_CLIENT_TLS_CA_FILE"
+  elif [ -f /certs/ca.crt ]; then
+    ca_file="/certs/ca.crt"
+  else
+    ca_file=""
+  fi
 
   jq -n \
     --arg server_url "$BIFROST_CLIENT_SERVER_URL" \
     --arg target_address "$BIFROST_CLIENT_TARGET_ADDRESS" \
-    --arg ca_file "${BIFROST_CLIENT_TLS_CA_FILE:-/certs/ca.crt}" \
+    --arg ca_file "$ca_file" \
     --arg server_name "${BIFROST_CLIENT_TLS_SERVER_NAME:-}" \
     --arg token "$BIFROST_CLIENT_TOKEN" \
     --argjson extra_headers "$headers_json" \
@@ -159,9 +166,9 @@ generate_client_config() {
           },
           tls: (
             {
-              ca_file: $ca_file,
               insecure_skip_verify: $insecure_skip_verify
             }
+            + (if $ca_file == "" then {} else {ca_file: $ca_file} end)
             + (if $server_name == "" then {} else {server_name: $server_name} end)
           )
         },

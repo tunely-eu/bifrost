@@ -23,11 +23,11 @@ Bifrost always uses TLS between the homelab connector and the cloud relay.
 
 With the default Docker paths:
 
-| Runtime side | Required files | Purpose |
+| Runtime side | File | Purpose |
 | --- | --- | --- |
 | Cloud relay | `/certs/server.crt` | Certificate presented to connectors. Its SAN must match the connector's `BIFROST_CLIENT_SERVER_URL` host or `BIFROST_CLIENT_TLS_SERVER_NAME`. |
 | Cloud relay | `/certs/server.key` | Private key for `/certs/server.crt`. Keep this file only on the relay. |
-| Homelab connector | `/certs/ca.crt` | CA certificate used to validate the relay certificate. For a self-signed test certificate, this can be the same public certificate as `server.crt`. |
+| Homelab connector | `/certs/ca.crt` | Optional CA certificate used to validate a private or self-signed relay certificate. For a self-signed test certificate, this can be the same public certificate as `server.crt`. If this file is absent and `BIFROST_CLIENT_TLS_CA_FILE` is unset, the connector uses the system trust store. |
 
 For the Compose examples using `cloud.example.com`, generate a self-signed test certificate with:
 
@@ -48,7 +48,7 @@ This creates:
 - `examples/certs/server.key`: mount on the cloud relay as `/certs/server.key`.
 - `examples/certs/ca.crt`: mount on the homelab connector as `/certs/ca.crt`.
 
-For production, use a certificate issued for the real relay hostname and provide the corresponding CA certificate to the connector. Do not copy `server.key` to the homelab side.
+For production, use a certificate issued for the real relay hostname. If it is issued by a public CA trusted by the image's system trust store, do not mount `/certs/ca.crt` on the connector. If it is issued by your own CA, mount that CA's public certificate on the connector. Do not copy `server.key` to the homelab side.
 
 ### Server Defaults
 
@@ -83,7 +83,7 @@ The default hook reads the generated accept request from stdin, extracts `x-bifr
 | `BIFROST_CLIENT_SERVER_URL` | yes | Cloud relay address in `host:port` form. |
 | `BIFROST_CLIENT_TARGET_ADDRESS` | yes | Local TCP target reached by the connector for every accepted tunnel stream. |
 | `BIFROST_CLIENT_TOKEN` | yes | Token sent as `X-Bifrost-Token` in the client hello. |
-| `BIFROST_CLIENT_TLS_CA_FILE` | no | CA certificate file used to validate the cloud relay certificate. Defaults to `/certs/ca.crt`. |
+| `BIFROST_CLIENT_TLS_CA_FILE` | no | CA certificate file used to validate the cloud relay certificate. If unset, generated Docker config uses `/certs/ca.crt` only when that file exists; otherwise the client uses the system trust store. |
 | `BIFROST_CLIENT_TLS_SERVER_NAME` | no | TLS server name override when the connection host and certificate name differ. |
 | `BIFROST_CLIENT_TLS_INSECURE_SKIP_VERIFY` | no | Development-only TLS verification bypass. |
 | `BIFROST_CLIENT_HEADERS_JSON` | no | Extra hello headers as a JSON object with string values. Must not include `X-Bifrost-Token`. |
@@ -155,7 +155,7 @@ Duration values accept Go duration strings such as `10s`, `2m`, and `1h`. Numeri
 | `client.headers` | map of string to string | empty | Generic hello headers sent to the relay before hook execution. |
 | `client.target.type` | string | `tcp` | Target type. Only `tcp` is currently supported. |
 | `client.target.address` | string | none | Local TCP target address reached for every accepted tunnel stream. Required. |
-| `client.tls.ca_file` | string | system trust store | Optional CA certificate file for validating the relay certificate. Docker env path defaults to `/certs/ca.crt`. |
+| `client.tls.ca_file` | string | system trust store | Optional CA certificate file for validating the relay certificate. Generated Docker config uses mounted `/certs/ca.crt` only when it exists. |
 | `client.tls.server_name` | string | host from `client.server_url` | TLS server name override. |
 | `client.tls.insecure_skip_verify` | bool | `false` | Development-only TLS verification bypass. |
 | `logging.level` | string | `info` | Log level. |
