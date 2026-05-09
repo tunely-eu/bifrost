@@ -412,14 +412,14 @@ func loadFile(path string, out any) error {
 const ExampleServerYAML = `server:
   listen: "127.0.0.1:8443"
   tls:
-    cert_file: "./examples/certs/server.crt"
-    key_file: "./examples/certs/server.key"
+    cert_file: "./bifrost/certs/server.crt"
+    key_file: "./bifrost/certs/server.key"
 
 accept_hook:
   command: "./docker/accept-json.sh"
   args:
     - "--clients"
-    - "./examples/clients.json"
+    - "./bifrost/clients.json"
 
 listener_policy:
   allowed_unix_prefixes:
@@ -439,7 +439,7 @@ const ExampleClientYAML = `client:
     type: "tcp"
     address: "127.0.0.1:8080"
   tls:
-    ca_file: "./examples/certs/ca.crt"
+    ca_file: "./bifrost/certs/ca.crt"
     server_name: "localhost"
 
 logging:

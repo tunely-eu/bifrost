@@ -1,3 +1,0 @@
-:8080 {
-	reverse_proxy unix//sockets/homelab-dashboard.sock
-}

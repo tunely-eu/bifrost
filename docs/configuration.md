@@ -29,24 +29,24 @@ With the default Docker paths:
 | Cloud relay | `/certs/server.key` | Private key for `/certs/server.crt`. Keep this file only on the relay. |
 | Homelab connector | `/certs/ca.crt` | Optional CA certificate used to validate a private or self-signed relay certificate. For a self-signed test certificate, this can be the same public certificate as `server.crt`. If this file is absent and `BIFROST_CLIENT_TLS_CA_FILE` is unset, the connector uses the system trust store. |
 
-For the Compose examples using `cloud.example.com`, generate a self-signed test certificate with:
+For a self-signed test deployment using `cloud.example.com`, generate a relay certificate with:
 
 ```bash
-mkdir -p examples/certs
+mkdir -p bifrost/certs
 openssl req -x509 -newkey rsa:4096 -sha256 -nodes \
   -days 365 \
-  -keyout examples/certs/server.key \
-  -out examples/certs/server.crt \
+  -keyout bifrost/certs/server.key \
+  -out bifrost/certs/server.crt \
   -subj "/CN=cloud.example.com" \
   -addext "subjectAltName=DNS:cloud.example.com"
-cp examples/certs/server.crt examples/certs/ca.crt
+cp bifrost/certs/server.crt bifrost/certs/ca.crt
 ```
 
 This creates:
 
-- `examples/certs/server.crt`: mount on the cloud relay as `/certs/server.crt`.
-- `examples/certs/server.key`: mount on the cloud relay as `/certs/server.key`.
-- `examples/certs/ca.crt`: mount on the homelab connector as `/certs/ca.crt`.
+- `bifrost/certs/server.crt`: mount on the cloud relay as `/certs/server.crt`.
+- `bifrost/certs/server.key`: mount on the cloud relay as `/certs/server.key`.
+- `bifrost/certs/ca.crt`: mount on the homelab connector as `/certs/ca.crt`.
 
 For production, use a certificate issued for the real relay hostname. If it is issued by a public CA trusted by the image's system trust store, do not mount `/certs/ca.crt` on the connector. If it is issued by your own CA, mount that CA's public certificate on the connector. Do not copy `server.key` to the homelab side.
 
