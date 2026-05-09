@@ -1,0 +1,20 @@
+# Build artifacts
+/bin/
+/dist/
+coverage.out
+*.test
+*.prof
+*.coverprofile
+
+# Local demo certificates
+/examples/certs/*
+!/examples/certs/.gitkeep
+
+# Local environment and editor files
+.env
+.env.*
+!.env.example
+*.log
+.DS_Store
+.idea/
+.vscode/
