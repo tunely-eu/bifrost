@@ -4,7 +4,6 @@ set -eu
 CONFIG_DIR="${BIFROST_GENERATED_CONFIG_DIR:-/run/bifrost}"
 SERVER_CONFIG="$CONFIG_DIR/server.yaml"
 CLIENT_CONFIG="$CONFIG_DIR/client.yaml"
-HOOK_PATH="/usr/local/share/bifrost/accept-json.sh"
 
 die() {
   echo "bifrost-entrypoint: $*" >&2
@@ -78,25 +77,29 @@ validate_headers_json() {
   fi
 }
 
+validate_clients_json() {
+  clients_json="$1"
+  if ! printf '%s' "$clients_json" | jq -e 'type == "array"' >/dev/null; then
+    die "BIFROST_SERVER_CLIENTS_JSON must be a JSON array"
+  fi
+}
+
 generate_server_config() {
+  require_env BIFROST_SERVER_CLIENTS_JSON
   mkdir -p "$CONFIG_DIR"
+
+  clients_json="$BIFROST_SERVER_CLIENTS_JSON"
+  validate_clients_json "$clients_json"
 
   jq -n \
     --arg listen "${BIFROST_SERVER_LISTEN:-:8443}" \
     --arg cert_file "${BIFROST_SERVER_TLS_CERT_FILE:-/certs/server.crt}" \
     --arg key_file "${BIFROST_SERVER_TLS_KEY_FILE:-/certs/server.key}" \
-    --arg clients_file "${BIFROST_ACCEPT_CLIENTS_FILE:-/etc/bifrost/clients.json}" \
-    --arg prefixes "${BIFROST_LISTENER_ALLOWED_UNIX_PREFIXES:-/sockets}" \
+    --argjson clients "$clients_json" \
     --arg admin_listen "${BIFROST_ADMIN_LISTEN:-}" \
     --arg log_level "${BIFROST_LOG_LEVEL:-info}" \
     --arg log_format "${BIFROST_LOG_FORMAT:-text}" \
-    --arg hook_path "$HOOK_PATH" \
     '
-      def csv:
-        split(",")
-        | map(gsub("^\\s+|\\s+$"; ""))
-        | map(select(length > 0));
-
       {
         server: {
           listen: $listen,
@@ -105,13 +108,7 @@ generate_server_config() {
             key_file: $key_file
           }
         },
-        accept_hook: {
-          command: $hook_path,
-          args: ["--clients", $clients_file]
-        },
-        listener_policy: {
-          allowed_unix_prefixes: ($prefixes | csv)
-        },
+        clients: $clients,
         logging: {
           level: $log_level,
           format: $log_format

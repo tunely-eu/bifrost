@@ -141,6 +141,9 @@ func pathAllowed(path string, prefixes []string) bool {
 			continue
 		}
 		cleanPrefix := filepath.Clean(prefix)
+		if cleanPrefix == string(os.PathSeparator) {
+			return true
+		}
 		if cleanPath == cleanPrefix || strings.HasPrefix(cleanPath, cleanPrefix+string(os.PathSeparator)) {
 			return true
 		}

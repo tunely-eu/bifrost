@@ -3,80 +3,89 @@ package acceptor
 import (
 	"context"
 	"encoding/json"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
-	"bifrost/internal/config"
-	"bifrost/internal/limits"
-	"bifrost/internal/listener"
+	"github.com/tunely-eu/bifrost/internal/limits"
 )
 
-func TestRunAcceptPassesHeaders(t *testing.T) {
-	dir := t.TempDir()
-	capturePath := filepath.Join(dir, "input.json")
-	scriptPath := filepath.Join(dir, "accept.sh")
-	script := "#!/bin/sh\n" +
-		"cat > '" + strings.ReplaceAll(capturePath, "'", "'\\''") + "'\n" +
-		"printf '{\"allow\":false,\"reason\":\"captured\"}\\n'\n"
-	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
-		t.Fatalf("write script: %v", err)
+func TestStaticProviderAcceptsKnownToken(t *testing.T) {
+	provider, err := NewStaticProvider([]StaticClient{
+		{
+			Token:       "secret",
+			EndpointKey: "home",
+			ConnectionPolicy: ConnectionPolicy{
+				Mode: PolicyReplaceExisting,
+			},
+			Limits: limits.PlanLimits{
+				MaxStreams:               10,
+				MaxBandwidthBPS:          1000,
+				StreamIdleTimeoutSeconds: 60,
+			},
+			Labels: map[string]string{"user": "dev"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewStaticProvider: %v", err)
 	}
 
-	decision, err := Run(context.Background(), config.HookConfig{
-		Command: scriptPath,
-	}, config.RuntimeConfig{
-		HookTimeout:        config.NewDuration(time.Second),
-		HookMaxStdoutBytes: 1024,
-	}, Request{
-		RemoteAddr:      "203.0.113.10:49152",
-		ProtocolVersion: "1",
-		Headers:         map[string]string{"x-bifrost-token": "secret"},
-		Transport:       "tls",
-		ALPN:            "bifrost/1",
-	}, nil, nil)
+	decision, err := provider.Accept(context.Background(), Request{
+		Headers: map[string]string{TokenHeader: "secret"},
+	})
 	if err != nil {
-		t.Fatalf("Run: %v", err)
+		t.Fatalf("Accept: %v", err)
 	}
-	if decision.Allow {
-		t.Fatal("expected rejection")
+	if !decision.Allow {
+		t.Fatalf("expected allow, got reason %q", decision.Reason)
 	}
-	captured, err := os.ReadFile(capturePath)
-	if err != nil {
-		t.Fatalf("read capture: %v", err)
+	if decision.EndpointKey != "home" {
+		t.Fatalf("endpoint = %q", decision.EndpointKey)
 	}
-	if !strings.Contains(string(captured), `"x-bifrost-token":"secret"`) {
-		t.Fatalf("captured request = %s", captured)
+	if decision.ConnectionPolicy.Mode != PolicyReplaceExisting {
+		t.Fatalf("policy = %q", decision.ConnectionPolicy.Mode)
+	}
+	if decision.Labels["user"] != "dev" {
+		t.Fatalf("labels = %#v", decision.Labels)
 	}
 }
 
-func TestRunAcceptTimeout(t *testing.T) {
-	dir := t.TempDir()
-	scriptPath := filepath.Join(dir, "accept.sh")
-	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh\nsleep 2\n"), 0o755); err != nil {
-		t.Fatalf("write script: %v", err)
+func TestStaticProviderRejectsUnknownToken(t *testing.T) {
+	provider, err := NewStaticProvider([]StaticClient{{Token: "secret", EndpointKey: "home"}})
+	if err != nil {
+		t.Fatalf("NewStaticProvider: %v", err)
 	}
-	_, err := Run(context.Background(), config.HookConfig{
-		Command: scriptPath,
-	}, config.RuntimeConfig{
-		HookTimeout:        config.NewDuration(10 * time.Millisecond),
-		HookMaxStdoutBytes: 1024,
-	}, Request{}, nil, nil)
-	if err == nil {
-		t.Fatal("expected timeout error")
+	decision, err := provider.Accept(context.Background(), Request{
+		Headers: map[string]string{TokenHeader: "other"},
+	})
+	if err != nil {
+		t.Fatalf("Accept: %v", err)
+	}
+	if decision.Allow {
+		t.Fatal("expected reject")
+	}
+	if !strings.Contains(decision.Reason, "unknown") {
+		t.Fatalf("reason = %q", decision.Reason)
+	}
+}
+
+func TestStaticProviderValidatesClients(t *testing.T) {
+	if _, err := NewStaticProvider([]StaticClient{{EndpointKey: "home"}}); err == nil {
+		t.Fatal("expected missing token error")
+	}
+	if _, err := NewStaticProvider([]StaticClient{{Token: "secret"}}); err == nil {
+		t.Fatal("expected missing endpoint_key error")
+	}
+	if _, err := NewStaticProvider([]StaticClient{
+		{Token: "secret", EndpointKey: "home"},
+		{Token: "secret", EndpointKey: "files"},
+	}); err == nil {
+		t.Fatal("expected duplicate token error")
 	}
 }
 
 func TestValidateDecisionRequiresEndpointKey(t *testing.T) {
-	_, err := ValidateDecision(Decision{
-		Allow: true,
-		Listener: listener.Spec{
-			Type:    "tcp",
-			Address: "127.0.0.1:0",
-		},
-	}, listener.Options{}, testGuardrails())
+	_, err := ValidateDecision(Decision{Allow: true}, testGuardrails())
 	if err == nil {
 		t.Fatal("expected missing endpoint_key error")
 	}
@@ -86,11 +95,7 @@ func TestValidateDecisionDefaultsPolicyAndLimits(t *testing.T) {
 	decision, err := ValidateDecision(Decision{
 		Allow:       true,
 		EndpointKey: "dev",
-		Listener: listener.Spec{
-			Type:    "tcp",
-			Address: "127.0.0.1:0",
-		},
-	}, listener.Options{}, testGuardrails())
+	}, testGuardrails())
 	if err != nil {
 		t.Fatalf("ValidateDecision: %v", err)
 	}
@@ -106,16 +111,12 @@ func TestValidateDecisionRejectsLimitsOutsideGuardrails(t *testing.T) {
 	_, err := ValidateDecision(Decision{
 		Allow:       true,
 		EndpointKey: "dev",
-		Listener: listener.Spec{
-			Type:    "tcp",
-			Address: "127.0.0.1:0",
-		},
 		Limits: limits.PlanLimits{
 			MaxStreams:               999,
 			MaxBandwidthBPS:          100,
 			StreamIdleTimeoutSeconds: 300,
 		},
-	}, listener.Options{}, testGuardrails())
+	}, testGuardrails())
 	if err == nil {
 		t.Fatal("expected guardrail rejection")
 	}
@@ -139,12 +140,10 @@ func TestDecisionRejectsUnsupportedLimitFields(t *testing.T) {
 
 func testGuardrails() limits.Guardrails {
 	return limits.Guardrails{
-		MaxSessions:               1000,
-		MaxStreamsPerSession:      512,
+		MaxSessions:               10,
+		MaxStreamsPerSession:      100,
 		MaxBandwidthBPSPerSession: 100_000_000,
-		MinStreamIdleTimeout:      30 * time.Second,
+		MinStreamIdleTimeout:      time.Second,
 		MaxStreamIdleTimeout:      time.Hour,
-		MaxHeaders:                32,
-		MaxHeaderBytes:            8192,
 	}
 }

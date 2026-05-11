@@ -10,25 +10,26 @@ import (
 	"sync/atomic"
 	"time"
 
-	"bifrost/internal/acceptor"
-	"bifrost/internal/config"
-	"bifrost/internal/header"
-	"bifrost/internal/limits"
-	"bifrost/internal/listener"
-	"bifrost/internal/logging"
-	"bifrost/internal/metrics"
-	"bifrost/internal/multiplex"
-	"bifrost/internal/pipe"
-	"bifrost/internal/protocol"
-	"bifrost/internal/tunnel"
+	"github.com/tunely-eu/bifrost/internal/acceptor"
+	"github.com/tunely-eu/bifrost/internal/config"
+	"github.com/tunely-eu/bifrost/internal/header"
+	"github.com/tunely-eu/bifrost/internal/limits"
+	"github.com/tunely-eu/bifrost/internal/listener"
+	"github.com/tunely-eu/bifrost/internal/logging"
+	"github.com/tunely-eu/bifrost/internal/metrics"
+	"github.com/tunely-eu/bifrost/internal/multiplex"
+	"github.com/tunely-eu/bifrost/internal/pipe"
+	"github.com/tunely-eu/bifrost/internal/protocol"
+	"github.com/tunely-eu/bifrost/internal/tunnel"
 )
 
 type Options struct {
-	Logger        *slog.Logger
-	Metrics       metrics.Recorder
-	Ready         func(net.Addr)
-	AdminReady    func(net.Addr)
-	ListenerReady func(endpointKey string, spec listener.Spec, addr net.Addr)
+	Logger         *slog.Logger
+	Metrics        metrics.Recorder
+	AcceptProvider acceptor.Provider
+	Ready          func(net.Addr)
+	AdminReady     func(net.Addr)
+	ListenerReady  func(endpointKey string, spec listener.Spec, addr net.Addr)
 }
 
 type Server struct {
@@ -36,8 +37,10 @@ type Server struct {
 	opts    Options
 	logger  *slog.Logger
 	metrics metrics.Recorder
+	accept  acceptor.Provider
 
 	mu       sync.Mutex
+	wg       sync.WaitGroup
 	nextID   uint64
 	active   int
 	sessions map[string][]*managedSession
@@ -50,40 +53,59 @@ type managedSession struct {
 	cancel      context.CancelFunc
 	done        chan struct{}
 	listener    *listener.Listener
+	mu          sync.RWMutex
 	mux         multiplex.Session
+	muxReady    chan struct{}
+	muxOnce     sync.Once
 	limits      limits.PlanLimits
 	limiter     *limits.RateLimiter
 	streams     chan struct{}
 }
 
 func Run(ctx context.Context, cfg config.ServerConfig, opts Options) error {
-	cfg.ApplyDefaults()
-	if err := cfg.Validate(); err != nil {
+	s, err := New(cfg, opts)
+	if err != nil {
 		return err
+	}
+	return s.Run(ctx)
+}
+
+func New(cfg config.ServerConfig, opts Options) (*Server, error) {
+	cfg.ApplyDefaults()
+	if err := cfg.ValidateWithProvider(opts.AcceptProvider != nil); err != nil {
+		return nil, err
 	}
 	logger := opts.Logger
 	if logger == nil {
 		var err error
 		logger, err = logging.New(cfg.Logging.Format, cfg.Logging.Level, nil)
 		if err != nil {
-			return err
+			return nil, err
 		}
 	}
 	recorder := opts.Metrics
 	if recorder == nil {
 		recorder = metrics.NewMemory()
 	}
-	s := &Server{
+	provider := opts.AcceptProvider
+	if provider == nil {
+		var err error
+		provider, err = acceptor.NewStaticProvider(cfg.StaticClients())
+		if err != nil {
+			return nil, err
+		}
+	}
+	return &Server{
 		cfg:      cfg,
 		opts:     opts,
 		logger:   logger,
 		metrics:  recorder,
+		accept:   provider,
 		sessions: make(map[string][]*managedSession),
-	}
-	return s.run(ctx)
+	}, nil
 }
 
-func (s *Server) run(ctx context.Context) error {
+func (s *Server) Run(ctx context.Context) error {
 	adminAddr, err := tunnel.RunAdmin(ctx, s.cfg.Admin.Listen, s.ready.Load, s.metrics, s.logger)
 	if err != nil {
 		return err
@@ -125,13 +147,19 @@ func (s *Server) run(ctx context.Context) error {
 		if err != nil {
 			select {
 			case <-ctx.Done():
+				s.wg.Wait()
 				return nil
 			default:
 			}
+			s.wg.Wait()
 			return err
 		}
 		s.metrics.Inc("connection_attempts_total")
-		go s.handleTunnel(ctx, conn, tlsConfig)
+		s.wg.Add(1)
+		go func() {
+			defer s.wg.Done()
+			s.handleTunnel(ctx, conn, tlsConfig)
+		}()
 	}
 }
 
@@ -174,19 +202,19 @@ func (s *Server) handleTunnel(parent context.Context, raw net.Conn, tlsConfig *t
 	}
 	_ = conn.SetDeadline(time.Time{})
 
-	decision, err := acceptor.Run(sessionCtx, s.cfg.AcceptHook, s.cfg.Runtime, acceptor.Request{
+	decision, err := s.accept.Accept(sessionCtx, acceptor.Request{
 		RemoteAddr:      raw.RemoteAddr().String(),
 		Headers:         headers,
 		ProtocolVersion: hello.ProtocolVersion,
 		Transport:       "tls",
 		ALPN:            protocol.ALPN,
 		Timestamp:       time.Now().UTC().Format(time.RFC3339),
-	}, s.logger, s.metrics)
+	})
 	if err != nil {
 		s.reject(conn, err.Error())
 		return
 	}
-	decision, err = acceptor.ValidateDecision(decision, s.listenerOptions(), s.cfg.Guardrails.ToLimits())
+	decision, err = acceptor.ValidateDecision(decision, s.cfg.Guardrails.ToLimits())
 	if err != nil {
 		s.reject(conn, err.Error())
 		return
@@ -201,10 +229,12 @@ func (s *Server) handleTunnel(parent context.Context, raw net.Conn, tlsConfig *t
 		return
 	}
 
+	listenerSpec, hasListener := s.cfg.ListenerForEndpoint(decision.EndpointKey)
 	managed := &managedSession{
 		id:          s.nextSessionID(),
 		endpointKey: decision.EndpointKey,
 		done:        make(chan struct{}),
+		muxReady:    make(chan struct{}),
 		limits:      decision.Limits,
 		limiter:     limits.NewRateLimiter(decision.Limits.MaxBandwidthBPS),
 		streams:     make(chan struct{}, decision.Limits.MaxStreams),
@@ -214,9 +244,7 @@ func (s *Server) handleTunnel(parent context.Context, raw net.Conn, tlsConfig *t
 		if managed.listener != nil {
 			_ = managed.listener.Close()
 		}
-		if managed.mux != nil {
-			_ = managed.mux.Close()
-		}
+		managed.closeMux()
 		_ = conn.Close()
 	}
 
@@ -235,16 +263,17 @@ func (s *Server) handleTunnel(parent context.Context, raw net.Conn, tlsConfig *t
 		close(managed.done)
 	}()
 
-	ln, err := listener.Listen(decision.Listener, s.listenerOptions())
-	if err != nil {
-		s.unregisterSession(managed)
-		s.reject(conn, err.Error())
-		return
-	}
-	managed.listener = ln
-	s.metrics.Inc("listeners_opened_total")
-	if s.opts.ListenerReady != nil {
-		s.opts.ListenerReady(decision.EndpointKey, decision.Listener, ln.Addr())
+	if hasListener {
+		ln, err := listener.Listen(listenerSpec, s.listenerOptions())
+		if err != nil {
+			s.reject(conn, err.Error())
+			return
+		}
+		managed.listener = ln
+		s.metrics.Inc("listeners_opened_total")
+		if s.opts.ListenerReady != nil {
+			s.opts.ListenerReady(decision.EndpointKey, listenerSpec, ln.Addr())
+		}
 	}
 
 	if err := protocol.WriteJSONLine(conn, protocol.Response{Accepted: true}, protocol.DefaultMaxLineBytes); err != nil {
@@ -259,9 +288,11 @@ func (s *Server) handleTunnel(parent context.Context, raw net.Conn, tlsConfig *t
 		s.logger.Warn("start yamux server failed", "endpoint_key", decision.EndpointKey, "error", err)
 		return
 	}
-	managed.mux = mux
+	managed.setMux(mux)
 
-	go s.acceptIngress(sessionCtx, managed)
+	if hasListener {
+		go s.acceptIngress(sessionCtx, managed)
+	}
 	select {
 	case <-sessionCtx.Done():
 	case <-mux.CloseChan():
@@ -347,24 +378,31 @@ func (s *Server) acceptIngress(ctx context.Context, session *managedSession) {
 			s.logger.Warn("accept listener connection failed", "endpoint_key", session.endpointKey, "error", err)
 			return
 		}
-		if !session.acquireStream() {
-			s.metrics.Inc("limit_violations_total")
-			_ = conn.Close()
-			continue
-		}
 		go s.forwardIngress(ctx, session, conn)
 	}
 }
 
 func (s *Server) forwardIngress(ctx context.Context, session *managedSession, ingressConn net.Conn) {
-	defer session.releaseStream()
-	stream, err := session.mux.Open()
-	if err != nil {
-		s.logger.Warn("open tunnel stream failed", "endpoint_key", session.endpointKey, "error", err)
-		_ = ingressConn.Close()
-		return
+	if err := s.proxySessionStream(ctx, session, ingressConn); err != nil {
+		s.logger.Warn("proxy ingress stream failed", "endpoint_key", session.endpointKey, "error", err)
 	}
-	s.metrics.Inc("streams_started_total")
+}
+
+func (s *Server) ProxyStream(ctx context.Context, endpointKey string, ingressConn net.Conn) error {
+	session, err := s.sessionForEndpoint(endpointKey)
+	if err != nil {
+		_ = ingressConn.Close()
+		return err
+	}
+	return s.proxySessionStream(ctx, session, ingressConn)
+}
+
+func (s *Server) proxySessionStream(ctx context.Context, session *managedSession, ingressConn net.Conn) error {
+	stream, err := s.openStream(ctx, session)
+	if err != nil {
+		_ = ingressConn.Close()
+		return err
+	}
 	pipe.ProxyWithOptions(ctx, ingressConn, stream, pipe.Options{
 		BufferSize:  limits.BufferSize(s.cfg.Runtime.StreamCopyBufferBytes),
 		IdleTimeout: session.limits.StreamIdleTimeout(),
@@ -374,13 +412,65 @@ func (s *Server) forwardIngress(ctx context.Context, session *managedSession, in
 		},
 	})
 	s.metrics.Inc("streams_ended_total")
+	return nil
+}
+
+func (s *Server) OpenStream(ctx context.Context, endpointKey string) (net.Conn, error) {
+	session, err := s.sessionForEndpoint(endpointKey)
+	if err != nil {
+		return nil, err
+	}
+	return s.openStream(ctx, session)
+}
+
+func (s *Server) sessionForEndpoint(endpointKey string) (*managedSession, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sessions := s.sessions[endpointKey]
+	if len(sessions) == 0 {
+		return nil, fmt.Errorf("endpoint_key %q has no active session", endpointKey)
+	}
+	return sessions[len(sessions)-1], nil
+}
+
+func (s *Server) openStream(ctx context.Context, session *managedSession) (net.Conn, error) {
+	mux, err := session.waitMux(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if !session.acquireStream() {
+		s.metrics.Inc("limit_violations_total")
+		return nil, fmt.Errorf("endpoint_key %q reached stream limit", session.endpointKey)
+	}
+	stream, err := mux.Open()
+	if err != nil {
+		session.releaseStream()
+		return nil, err
+	}
+	s.metrics.Inc("streams_started_total")
+	return &managedStream{
+		Conn:    stream,
+		release: session.releaseStream,
+	}, nil
+}
+
+type managedStream struct {
+	net.Conn
+	once    sync.Once
+	release func()
+}
+
+func (s *managedStream) Close() error {
+	err := s.Conn.Close()
+	s.once.Do(s.release)
+	return err
 }
 
 func (s *Server) listenerOptions() listener.Options {
 	return listener.Options{
-		AllowedUnixPrefixes: s.cfg.ListenerPolicy.AllowedUnixPrefixes,
-		AllowPublicTCP:      s.cfg.ListenerPolicy.AllowPublicTCP,
-		CreateParentDirs:    s.cfg.ListenerPolicy.CreateParentDirs,
+		AllowedUnixPrefixes: []string{"/"},
+		AllowPublicTCP:      true,
+		CreateParentDirs:    true,
 	}
 }
 
@@ -397,6 +487,40 @@ func (session *managedSession) releaseStream() {
 	select {
 	case <-session.streams:
 	default:
+	}
+}
+
+func (session *managedSession) setMux(mux multiplex.Session) {
+	session.mu.Lock()
+	session.mux = mux
+	session.mu.Unlock()
+	session.muxOnce.Do(func() {
+		close(session.muxReady)
+	})
+}
+
+func (session *managedSession) waitMux(ctx context.Context) (multiplex.Session, error) {
+	select {
+	case <-session.muxReady:
+	case <-session.done:
+		return nil, fmt.Errorf("endpoint_key %q session closed before it was ready", session.endpointKey)
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	session.mu.RLock()
+	defer session.mu.RUnlock()
+	if session.mux == nil {
+		return nil, fmt.Errorf("endpoint_key %q session is not ready", session.endpointKey)
+	}
+	return session.mux, nil
+}
+
+func (session *managedSession) closeMux() {
+	session.mu.RLock()
+	mux := session.mux
+	session.mu.RUnlock()
+	if mux != nil {
+		_ = mux.Close()
 	}
 }
 

@@ -59,7 +59,7 @@ flowchart LR
   client --> app
 ```
 
-The connector sends a token during the tunnel handshake. On the server side, the default accept hook looks that token up in `clients.json`. If the token is allowed, the hook tells the server which listener to create and which limits to apply.
+The connector sends a token during the tunnel handshake. On the server side, Bifrost matches that token against native `clients[]` configuration. If the token is allowed, the server binds the configured listener and applies the configured limits.
 
 For HTTP services, the common shape is:
 
@@ -119,37 +119,35 @@ The token admits the connector. The relay certificate secures the tunnel transpo
 
 If the relay certificate is issued by a public CA such as Let's Encrypt, mount that certificate and key on the relay instead. In that case the connector does not need a `ca.crt` mount; the Docker image falls back to the system trust store when `/certs/ca.crt` is absent.
 
-Create `bifrost/clients.json`. The `listener.path` must match the Unix socket your public reverse proxy will use:
+Add the client definition to the server configuration. In Docker-generated config this is supplied through `BIFROST_SERVER_CLIENTS_JSON`. The `listener.path` must match the Unix socket your public reverse proxy will use:
 
 ```json
-{
-  "clients": [
-    {
-      "token": "replace-this-with-a-long-random-token",
-      "endpoint_key": "home-assistant",
-      "listener": {
-        "type": "unix",
-        "path": "/sockets/home-assistant.sock",
-        "mode": "0600"
-      },
-      "connection_policy": {
-        "mode": "replace_existing",
-        "max_parallel": 1
-      },
-      "limits": {
-        "max_streams": 100,
-        "max_bandwidth_bps": 25000000,
-        "stream_idle_timeout_seconds": 300
-      },
-      "labels": {
-        "service": "home-assistant"
-      }
+[
+  {
+    "token": "replace-this-with-a-long-random-token",
+    "endpoint_key": "home-assistant",
+    "listener": {
+      "type": "unix",
+      "path": "/sockets/home-assistant.sock",
+      "mode": "0600"
+    },
+    "connection_policy": {
+      "mode": "replace_existing",
+      "max_parallel": 1
+    },
+    "limits": {
+      "max_streams": 100,
+      "max_bandwidth_bps": 25000000,
+      "stream_idle_timeout_seconds": 300
+    },
+    "labels": {
+      "service": "home-assistant"
     }
-  ]
-}
+  }
+]
 ```
 
-Keep `bifrost/certs/server.key` only on the public server. The local connector only needs `bifrost/certs/ca.crt` and the same token used in `bifrost/clients.json`.
+Keep `bifrost/certs/server.key` only on the public server. The local connector only needs `bifrost/certs/ca.crt` and the same token used in the server `clients[]` config.
 
 ### 2. Add Bifrost To The Public Compose Project
 
@@ -161,8 +159,22 @@ services:
     image: ghcr.io/tunely-eu/bifrost:latest
     command: ["server"]
     restart: unless-stopped
+    environment:
+      BIFROST_SERVER_CLIENTS_JSON: |
+        [
+          {
+            "token": "replace-this-with-a-long-random-token",
+            "endpoint_key": "home-assistant",
+            "listener": {
+              "type": "unix",
+              "path": "/sockets/home-assistant.sock",
+              "mode": "0600"
+            },
+            "connection_policy": {"mode": "replace_existing"},
+            "limits": {"max_streams": 100}
+          }
+        ]
     volumes:
-      - ./bifrost/clients.json:/etc/bifrost/clients.json:ro
       - ./bifrost/certs/server.crt:/certs/server.crt:ro
       - ./bifrost/certs/server.key:/certs/server.key:ro
       - bifrost_sockets:/sockets
@@ -216,7 +228,7 @@ services:
       - ./bifrost/certs/ca.crt:/certs/ca.crt:ro
 ```
 
-For Jellyfin, use `/sockets/jellyfin.sock` in `clients.json` and the Caddy route, then change the local target:
+For Jellyfin, use `/sockets/jellyfin.sock` in `BIFROST_SERVER_CLIENTS_JSON` and the Caddy route, then change the local target:
 
 ```yaml
 environment:
@@ -241,7 +253,7 @@ If the request fails, check these points first:
 - The public VM allows inbound TCP `8443`, `80`, and `443`.
 - The local host can open outbound TCP connections to `relay.example.com:8443`.
 - For a private or self-signed relay certificate, the local host has `ca.crt`, not `server.key`. For a public-CA relay certificate, no client CA mount is needed.
-- `BIFROST_CLIENT_TOKEN` matches the token in `bifrost/clients.json`.
+- `BIFROST_CLIENT_TOKEN` matches the token in the server `clients[]` config.
 - The Caddy socket path matches `clients[].listener.path`.
 
 ## Configuration Model
@@ -266,40 +278,33 @@ Mount these paths when using the generated Docker configuration:
 - `/certs/server.crt`: server TLS certificate
 - `/certs/server.key`: server TLS private key
 - `/certs/ca.crt`: optional client CA certificate for private or self-signed relay certificates
-- `/etc/bifrost/clients.json`: client definitions for the bundled JSON accept hook
 - `/sockets`: allowed Unix socket directory for server-side listeners
 
-The cloud relay listens on `:8443` by default. The bundled accept hook reads `/etc/bifrost/clients.json` and returns the listener, connection policy, labels, and limits for a matching connector token.
+The cloud relay listens on `:8443` by default. Generated Docker config requires `BIFROST_SERVER_CLIENTS_JSON`, a JSON array of client definitions.
 
-The full generated Docker config reference, explicit config schema, and custom hook settings are documented in [Configuration](docs/configuration.md).
+The full generated Docker config reference and explicit config schema are documented in [Configuration](docs/configuration.md).
 
 ## Security And Limitations
 
 - Client-server tunnel transport is always TLS.
 - ALPN must be `bifrost/1`.
 - The client hello is JSON and size-limited.
-- Header names are validated and normalized before hook execution.
+- Header names are validated and normalized before admission decisions.
 - Header values are generic runtime metadata and are redacted in logs.
-- Hook failures, hook timeouts, invalid hook output, invalid listener specs, and missing `endpoint_key` fail closed.
-- TCP listeners bind only to localhost unless public TCP listeners are explicitly enabled.
-- Unix sockets are restricted to configured path prefixes.
+- Admission failures, invalid client definitions, invalid listener specs, and missing `endpoint_key` fail closed.
 - Streams, sessions, buffers, idle time, and bandwidth have bounded defaults.
 
 TLS protects the tunnel between `bifrost-client` and `bifrost-server`. Bifrost does not automatically apply TLS to the server-side listener or to the client-side local target; it forwards the bytes it receives.
 
 Application authentication stays with your reverse proxy or target service. Public HTTPS for web services stays with Caddy, Nginx, or another proxy on the public VM. See [Security](docs/security.md).
 
-## Accept Hooks
+## Library Accept Providers
 
-The accept hook is the control point between the tunnel runtime and your environment. For each connector connection, the cloud relay sends one JSON request to the hook and expects one JSON decision back.
+Bifrost exposes an `AcceptProvider` interface for embedded use. The standalone `bifrost-server` builds a static provider from top-level `clients[]` config.
 
-The Docker image uses the bundled `docker/accept-json.sh` hook by default. Inside the image it is installed at `/usr/local/share/bifrost/accept-json.sh`; the generated server config calls it with `--clients /etc/bifrost/clients.json`.
+Product-specific modules can provide their own `AcceptProvider` without shell hooks or external helper processes. This is the intended path for Tunely Control Plane integration.
 
-The default hook uses `jq` and a `clients.json` file. It is intentionally simple so the hook contract is easy to inspect, replace, or port to another control plane.
-
-Use a custom hook when token lookup in `clients.json` is not enough, for example when decisions should come from a database, provisioning system, or internal policy service. To use a custom hook in Docker, mount your hook and an explicit server config, then start the server with `server --config /path/to/server.yaml` so the entrypoint does not generate one.
-
-The full hook contract is documented in [Protocol](docs/protocol.md) and [Configuration](docs/configuration.md).
+The library API and config schema are documented in [Configuration](docs/configuration.md).
 
 ## Local Development
 

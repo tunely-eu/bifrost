@@ -91,8 +91,6 @@ type Guardrails struct {
 
 type Runtime struct {
 	HandshakeTimeout        time.Duration
-	HookTimeout             time.Duration
-	HookMaxStdoutBytes      int64
 	StreamCopyBufferBytes   int
 	TunnelKeepAliveInterval time.Duration
 	TunnelKeepAliveTimeout  time.Duration

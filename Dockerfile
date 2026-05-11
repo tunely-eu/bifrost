@@ -14,6 +14,5 @@ COPY --from=build /out/bifrost-server /usr/local/bin/bifrost-server
 COPY --from=build /out/bifrost-client /usr/local/bin/bifrost-client
 COPY --from=build /out/bifrostctl /usr/local/bin/bifrostctl
 COPY docker/bifrost-entrypoint /usr/local/bin/bifrost-entrypoint
-COPY docker/accept-json.sh /usr/local/share/bifrost/accept-json.sh
-RUN chmod +x /usr/local/bin/bifrost-entrypoint /usr/local/share/bifrost/accept-json.sh
+RUN chmod +x /usr/local/bin/bifrost-entrypoint
 ENTRYPOINT ["bifrost-entrypoint"]

@@ -16,15 +16,16 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
-	"bifrost/internal/client"
-	"bifrost/internal/config"
-	"bifrost/internal/listener"
-	"bifrost/internal/protocol"
-	"bifrost/internal/server"
+	"github.com/tunely-eu/bifrost/internal/acceptor"
+	"github.com/tunely-eu/bifrost/internal/client"
+	"github.com/tunely-eu/bifrost/internal/config"
+	"github.com/tunely-eu/bifrost/internal/limits"
+	"github.com/tunely-eu/bifrost/internal/listener"
+	"github.com/tunely-eu/bifrost/internal/protocol"
+	"github.com/tunely-eu/bifrost/internal/server"
 )
 
 func TestTunnelForwardsBytesOverTLSUnixSocket(t *testing.T) {
@@ -34,7 +35,6 @@ func TestTunnelForwardsBytesOverTLSUnixSocket(t *testing.T) {
 	dir := t.TempDir()
 	certFile, keyFile, caFile := writeSelfSignedCert(t, dir)
 	socketPath := filepath.Join(dir, "dev.sock")
-	hookPath := writeAcceptHook(t, fmt.Sprintf(`{"allow":true,"reason":"accepted","endpoint_key":"dev","listener":{"type":"unix","path":%q,"mode":"0600"},"connection_policy":{"mode":"replace_existing"},"limits":{"max_streams":50,"max_bandwidth_bps":100000000,"stream_idle_timeout_seconds":30}}`, socketPath))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -43,7 +43,17 @@ func TestTunnelForwardsBytesOverTLSUnixSocket(t *testing.T) {
 	listenerReady := make(chan listener.Spec, 1)
 	serverErr := make(chan error, 1)
 	go func() {
-		serverErr <- server.Run(ctx, serverConfig(certFile, keyFile, hookPath, dir), server.Options{
+		serverErr <- server.Run(ctx, serverConfig(certFile, keyFile, config.Client{
+			Token:       "dev-secret",
+			EndpointKey: "dev",
+			Listener: listener.Spec{
+				Type: "unix",
+				Path: socketPath,
+				Mode: "0600",
+			},
+			ConnectionPolicy: acceptor.ConnectionPolicy{Mode: acceptor.PolicyReplaceExisting},
+			Limits:           testPlanLimits(50),
+		}), server.Options{
 			Logger: discardLogger(),
 			Ready: func(addr net.Addr) {
 				serverReady <- addr
@@ -92,7 +102,6 @@ func TestRejectIfExistsRejectsSecondSession(t *testing.T) {
 
 	dir := t.TempDir()
 	certFile, keyFile, caFile := writeSelfSignedCert(t, dir)
-	hookPath := writeAcceptHook(t, `{"allow":true,"endpoint_key":"same","listener":{"type":"tcp","address":"127.0.0.1:0"},"connection_policy":{"mode":"reject_if_exists"},"limits":{"max_streams":10,"max_bandwidth_bps":100000000,"stream_idle_timeout_seconds":30}}`)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -101,7 +110,13 @@ func TestRejectIfExistsRejectsSecondSession(t *testing.T) {
 	listenerReady := make(chan listener.Spec, 1)
 	serverErr := make(chan error, 1)
 	go func() {
-		serverErr <- server.Run(ctx, serverConfig(certFile, keyFile, hookPath, dir), server.Options{
+		serverErr <- server.Run(ctx, serverConfig(certFile, keyFile, config.Client{
+			Token:            "dev-secret",
+			EndpointKey:      "same",
+			Listener:         listener.Spec{Type: "tcp", Address: "127.0.0.1:0"},
+			ConnectionPolicy: acceptor.ConnectionPolicy{Mode: acceptor.PolicyRejectIfExists},
+			Limits:           testPlanLimits(10),
+		}), server.Options{
 			Logger: discardLogger(),
 			Ready: func(addr net.Addr) {
 				serverReady <- addr
@@ -145,7 +160,6 @@ func TestRejectIfExistsRejectsSecondSession(t *testing.T) {
 func TestServerRejectsWrongALPN(t *testing.T) {
 	dir := t.TempDir()
 	certFile, keyFile, caFile := writeSelfSignedCert(t, dir)
-	hookPath := writeAcceptHook(t, `{"allow":true,"endpoint_key":"dev","listener":{"type":"tcp","address":"127.0.0.1:0"}}`)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -153,7 +167,10 @@ func TestServerRejectsWrongALPN(t *testing.T) {
 	serverReady := make(chan net.Addr, 1)
 	serverErr := make(chan error, 1)
 	go func() {
-		serverErr <- server.Run(ctx, serverConfig(certFile, keyFile, hookPath, dir), server.Options{
+		serverErr <- server.Run(ctx, serverConfig(certFile, keyFile, config.Client{
+			Token:       "dev-secret",
+			EndpointKey: "dev",
+		}), server.Options{
 			Logger: discardLogger(),
 			Ready: func(addr net.Addr) {
 				serverReady <- addr
@@ -199,7 +216,6 @@ func TestServerKeepAliveTimeoutCleansUpSessionListener(t *testing.T) {
 	dir := t.TempDir()
 	certFile, keyFile, caFile := writeSelfSignedCert(t, dir)
 	socketPath := filepath.Join(dir, "stale.sock")
-	hookPath := writeAcceptHook(t, fmt.Sprintf(`{"allow":true,"endpoint_key":"stale","listener":{"type":"unix","path":%q},"connection_policy":{"mode":"replace_existing"},"limits":{"max_streams":10,"max_bandwidth_bps":100000000,"stream_idle_timeout_seconds":30}}`, socketPath))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -207,7 +223,13 @@ func TestServerKeepAliveTimeoutCleansUpSessionListener(t *testing.T) {
 	serverReady := make(chan net.Addr, 1)
 	listenerReady := make(chan listener.Spec, 1)
 	serverErr := make(chan error, 1)
-	cfg := serverConfig(certFile, keyFile, hookPath, dir)
+	cfg := serverConfig(certFile, keyFile, config.Client{
+		Token:            "dev-secret",
+		EndpointKey:      "stale",
+		Listener:         listener.Spec{Type: "unix", Path: socketPath},
+		ConnectionPolicy: acceptor.ConnectionPolicy{Mode: acceptor.PolicyReplaceExisting},
+		Limits:           testPlanLimits(10),
+	})
 	cfg.Runtime.TunnelKeepAliveInterval = config.NewDuration(20 * time.Millisecond)
 	cfg.Runtime.TunnelKeepAliveTimeout = config.NewDuration(20 * time.Millisecond)
 	go func() {
@@ -238,19 +260,24 @@ func TestServerKeepAliveTimeoutCleansUpSessionListener(t *testing.T) {
 	expectCleanShutdown(t, serverErr, "server")
 }
 
-func serverConfig(certFile, keyFile, hookPath, prefix string) config.ServerConfig {
+func serverConfig(certFile, keyFile string, clients ...config.Client) config.ServerConfig {
 	cfg := config.DefaultServerConfig()
 	cfg.Server.Listen = "127.0.0.1:0"
 	cfg.Server.TLS.CertFile = certFile
 	cfg.Server.TLS.KeyFile = keyFile
-	cfg.AcceptHook.Command = hookPath
-	cfg.Runtime.HookTimeout = config.NewDuration(time.Second)
-	cfg.ListenerPolicy.AllowedUnixPrefixes = []string{prefix}
-	cfg.ListenerPolicy.CreateParentDirs = true
+	cfg.Clients = clients
 	cfg.Guardrails.MaxSessions = 10
 	cfg.Guardrails.MaxBandwidthBPSPerSession = 100_000_000
 	cfg.ApplyDefaults()
 	return cfg
+}
+
+func testPlanLimits(maxStreams int) limits.PlanLimits {
+	return limits.PlanLimits{
+		MaxStreams:               maxStreams,
+		MaxBandwidthBPS:          100_000_000,
+		StreamIdleTimeoutSeconds: 30,
+	}
 }
 
 func openRawAcceptedTunnel(t *testing.T, serverAddr, caFile string) *tls.Conn {
@@ -307,21 +334,6 @@ func clientConfig(serverAddr, targetAddr, caFile string) config.ClientConfig {
 	cfg.Client.TLS.ServerName = "localhost"
 	cfg.ApplyDefaults()
 	return cfg
-}
-
-func writeAcceptHook(t *testing.T, output string) string {
-	t.Helper()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "accept.sh")
-	script := "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '" + stringsReplaceForSingleQuote(output) + "'\n"
-	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
-		t.Fatalf("write hook: %v", err)
-	}
-	return path
-}
-
-func stringsReplaceForSingleQuote(raw string) string {
-	return strings.ReplaceAll(raw, "'", "'\\''")
 }
 
 func writeSelfSignedCert(t *testing.T, dir string) (string, string, string) {

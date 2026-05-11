@@ -55,7 +55,7 @@ func TestServerConfigValidation(t *testing.T) {
 	cfg := DefaultServerConfig()
 	cfg.Server.TLS.CertFile = ""
 	cfg.Server.TLS.KeyFile = "key.pem"
-	cfg.AcceptHook.Command = "/bin/true"
+	cfg.Clients = []Client{{Token: "secret", EndpointKey: "home"}}
 	cfg.ApplyDefaults()
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("expected missing cert_file error")

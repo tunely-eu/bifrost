@@ -11,8 +11,10 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"bifrost/internal/header"
-	"bifrost/internal/limits"
+	"github.com/tunely-eu/bifrost/internal/acceptor"
+	"github.com/tunely-eu/bifrost/internal/header"
+	"github.com/tunely-eu/bifrost/internal/limits"
+	"github.com/tunely-eu/bifrost/internal/listener"
 )
 
 type Duration struct {
@@ -77,13 +79,12 @@ func (d Duration) MarshalJSON() ([]byte, error) {
 }
 
 type ServerConfig struct {
-	Server         ServerSection        `json:"server" yaml:"server"`
-	AcceptHook     HookConfig           `json:"accept_hook" yaml:"accept_hook"`
-	ListenerPolicy ListenerPolicyConfig `json:"listener_policy" yaml:"listener_policy"`
-	Guardrails     GuardrailsConfig     `json:"guardrails,omitempty" yaml:"guardrails,omitempty"`
-	Runtime        RuntimeConfig        `json:"runtime,omitempty" yaml:"runtime,omitempty"`
-	Logging        Logging              `json:"logging" yaml:"logging"`
-	Admin          Admin                `json:"admin" yaml:"admin"`
+	Server     ServerSection    `json:"server" yaml:"server"`
+	Clients    []Client         `json:"clients,omitempty" yaml:"clients,omitempty"`
+	Guardrails GuardrailsConfig `json:"guardrails,omitempty" yaml:"guardrails,omitempty"`
+	Runtime    RuntimeConfig    `json:"runtime,omitempty" yaml:"runtime,omitempty"`
+	Logging    Logging          `json:"logging" yaml:"logging"`
+	Admin      Admin            `json:"admin" yaml:"admin"`
 }
 
 type ServerSection struct {
@@ -96,15 +97,13 @@ type ServerTLSConfig struct {
 	KeyFile  string `json:"key_file" yaml:"key_file"`
 }
 
-type HookConfig struct {
-	Command string   `json:"command" yaml:"command"`
-	Args    []string `json:"args,omitempty" yaml:"args,omitempty"`
-}
-
-type ListenerPolicyConfig struct {
-	AllowedUnixPrefixes []string `json:"allowed_unix_prefixes,omitempty" yaml:"allowed_unix_prefixes,omitempty"`
-	AllowPublicTCP      bool     `json:"allow_public_tcp,omitempty" yaml:"allow_public_tcp,omitempty"`
-	CreateParentDirs    bool     `json:"create_parent_dirs,omitempty" yaml:"create_parent_dirs,omitempty"`
+type Client struct {
+	Token            string                    `json:"token" yaml:"token"`
+	EndpointKey      string                    `json:"endpoint_key" yaml:"endpoint_key"`
+	ConnectionPolicy acceptor.ConnectionPolicy `json:"connection_policy,omitempty" yaml:"connection_policy,omitempty"`
+	Limits           limits.PlanLimits         `json:"limits,omitempty" yaml:"limits,omitempty"`
+	Labels           map[string]string         `json:"labels,omitempty" yaml:"labels,omitempty"`
+	Listener         listener.Spec             `json:"listener,omitempty" yaml:"listener,omitempty"`
 }
 
 type GuardrailsConfig struct {
@@ -119,8 +118,6 @@ type GuardrailsConfig struct {
 
 type RuntimeConfig struct {
 	HandshakeTimeout        Duration `json:"handshake_timeout,omitempty" yaml:"handshake_timeout,omitempty"`
-	HookTimeout             Duration `json:"hook_timeout,omitempty" yaml:"hook_timeout,omitempty"`
-	HookMaxStdoutBytes      int64    `json:"hook_max_stdout_bytes,omitempty" yaml:"hook_max_stdout_bytes,omitempty"`
 	StreamCopyBufferBytes   int      `json:"stream_copy_buffer_bytes,omitempty" yaml:"stream_copy_buffer_bytes,omitempty"`
 	TunnelKeepAliveInterval Duration `json:"tunnel_keepalive_interval,omitempty" yaml:"tunnel_keepalive_interval,omitempty"`
 	TunnelKeepAliveTimeout  Duration `json:"tunnel_keepalive_timeout,omitempty" yaml:"tunnel_keepalive_timeout,omitempty"`
@@ -164,10 +161,6 @@ func DefaultServerConfig() ServerConfig {
 		Server: ServerSection{
 			Listen: "127.0.0.1:8443",
 		},
-		ListenerPolicy: ListenerPolicyConfig{
-			AllowedUnixPrefixes: []string{"/run/bifrost", "/tmp/bifrost"},
-			CreateParentDirs:    true,
-		},
 		Guardrails: GuardrailsConfig{
 			MaxSessions:               1000,
 			MaxStreamsPerSession:      512,
@@ -179,8 +172,6 @@ func DefaultServerConfig() ServerConfig {
 		},
 		Runtime: RuntimeConfig{
 			HandshakeTimeout:        NewDuration(10 * time.Second),
-			HookTimeout:             NewDuration(2 * time.Second),
-			HookMaxStdoutBytes:      64 * 1024,
 			StreamCopyBufferBytes:   32 * 1024,
 			TunnelKeepAliveInterval: NewDuration(30 * time.Second),
 			TunnelKeepAliveTimeout:  NewDuration(10 * time.Second),
@@ -228,9 +219,6 @@ func (c *ServerConfig) ApplyDefaults() {
 	if c.Server.Listen == "" {
 		c.Server.Listen = defaults.Server.Listen
 	}
-	if len(c.ListenerPolicy.AllowedUnixPrefixes) == 0 {
-		c.ListenerPolicy.AllowedUnixPrefixes = defaults.ListenerPolicy.AllowedUnixPrefixes
-	}
 	if c.Guardrails.MaxSessions <= 0 {
 		c.Guardrails.MaxSessions = defaults.Guardrails.MaxSessions
 	}
@@ -254,12 +242,6 @@ func (c *ServerConfig) ApplyDefaults() {
 	}
 	if c.Runtime.HandshakeTimeout.Duration <= 0 {
 		c.Runtime.HandshakeTimeout = defaults.Runtime.HandshakeTimeout
-	}
-	if c.Runtime.HookTimeout.Duration <= 0 {
-		c.Runtime.HookTimeout = defaults.Runtime.HookTimeout
-	}
-	if c.Runtime.HookMaxStdoutBytes <= 0 {
-		c.Runtime.HookMaxStdoutBytes = defaults.Runtime.HookMaxStdoutBytes
 	}
 	if c.Runtime.StreamCopyBufferBytes <= 0 {
 		c.Runtime.StreamCopyBufferBytes = defaults.Runtime.StreamCopyBufferBytes
@@ -295,6 +277,10 @@ func (c *ClientConfig) ApplyDefaults() {
 }
 
 func (c ServerConfig) Validate() error {
+	return c.ValidateWithProvider(false)
+}
+
+func (c ServerConfig) ValidateWithProvider(providerConfigured bool) error {
 	if c.Server.Listen == "" {
 		return fmt.Errorf("server.listen is required")
 	}
@@ -303,9 +289,6 @@ func (c ServerConfig) Validate() error {
 	}
 	if c.Server.TLS.KeyFile == "" {
 		return fmt.Errorf("server.tls.key_file is required")
-	}
-	if len(c.ListenerPolicy.AllowedUnixPrefixes) == 0 {
-		return fmt.Errorf("listener_policy.allowed_unix_prefixes is required")
 	}
 	if c.Guardrails.MaxSessions <= 0 {
 		return fmt.Errorf("guardrails.max_sessions must be positive")
@@ -328,17 +311,27 @@ func (c ServerConfig) Validate() error {
 	if c.Guardrails.MaxHeaderBytes <= 0 {
 		return fmt.Errorf("guardrails.max_header_bytes must be positive")
 	}
-	if c.AcceptHook.Command == "" {
-		return fmt.Errorf("accept_hook.command is required")
+	if !providerConfigured && len(c.Clients) == 0 {
+		return fmt.Errorf("clients is required")
+	}
+	if !providerConfigured {
+		if _, err := acceptor.NewStaticProvider(c.StaticClients()); err != nil {
+			return err
+		}
+	}
+	for index, client := range c.Clients {
+		if client.Listener.Type == "" {
+			continue
+		}
+		if err := listener.Validate(client.Listener, listener.Options{
+			AllowedUnixPrefixes: []string{"/"},
+			AllowPublicTCP:      true,
+		}); err != nil {
+			return fmt.Errorf("clients[%d].listener: %w", index, err)
+		}
 	}
 	if c.Runtime.HandshakeTimeout.Duration <= 0 {
 		return fmt.Errorf("runtime.handshake_timeout must be positive")
-	}
-	if c.Runtime.HookTimeout.Duration <= 0 {
-		return fmt.Errorf("runtime.hook_timeout must be positive")
-	}
-	if c.Runtime.HookMaxStdoutBytes <= 0 {
-		return fmt.Errorf("runtime.hook_max_stdout_bytes must be positive")
 	}
 	if c.Runtime.StreamCopyBufferBytes <= 0 {
 		return fmt.Errorf("runtime.stream_copy_buffer_bytes must be positive")
@@ -352,15 +345,45 @@ func (c ServerConfig) Validate() error {
 	return nil
 }
 
+func (c ServerConfig) StaticClients() []acceptor.StaticClient {
+	clients := make([]acceptor.StaticClient, 0, len(c.Clients))
+	for _, client := range c.Clients {
+		clients = append(clients, acceptor.StaticClient{
+			Token:            client.Token,
+			EndpointKey:      client.EndpointKey,
+			ConnectionPolicy: client.ConnectionPolicy,
+			Limits:           client.Limits,
+			Labels:           client.Labels,
+		})
+	}
+	return clients
+}
+
+func (c ServerConfig) ListenerForEndpoint(endpointKey string) (listener.Spec, bool) {
+	for _, client := range c.Clients {
+		if client.EndpointKey == endpointKey && client.Listener.Type != "" {
+			return client.Listener, true
+		}
+	}
+	return listener.Spec{}, false
+}
+
 func (c ClientConfig) Validate() error {
-	if c.Client.ServerURL == "" {
-		return fmt.Errorf("client.server_url is required")
+	if err := c.ValidateHandshake(); err != nil {
+		return err
 	}
 	if c.Client.Target.Type != "tcp" {
 		return fmt.Errorf("client.target.type must be tcp")
 	}
 	if c.Client.Target.Address == "" {
 		return fmt.Errorf("client.target.address is required")
+	}
+	return nil
+}
+
+func (c ClientConfig) ValidateHandshake() error {
+	if c.Client.ServerURL == "" {
+		return fmt.Errorf("client.server_url is required")
 	}
 	if _, err := header.Normalize(c.Client.Headers, 32, 8192); err != nil {
 		return err
@@ -383,8 +406,6 @@ func (c GuardrailsConfig) ToLimits() limits.Guardrails {
 func (c RuntimeConfig) ToLimits() limits.Runtime {
 	return limits.Runtime{
 		HandshakeTimeout:        c.HandshakeTimeout.Duration,
-		HookTimeout:             c.HookTimeout.Duration,
-		HookMaxStdoutBytes:      c.HookMaxStdoutBytes,
 		StreamCopyBufferBytes:   c.StreamCopyBufferBytes,
 		TunnelKeepAliveInterval: c.TunnelKeepAliveInterval.Duration,
 		TunnelKeepAliveTimeout:  c.TunnelKeepAliveTimeout.Duration,
@@ -415,16 +436,17 @@ const ExampleServerYAML = `server:
     cert_file: "./bifrost/certs/server.crt"
     key_file: "./bifrost/certs/server.key"
 
-accept_hook:
-  command: "./docker/accept-json.sh"
-  args:
-    - "--clients"
-    - "./bifrost/clients.json"
-
-listener_policy:
-  allowed_unix_prefixes:
-    - "/tmp/bifrost"
-    - "/run/bifrost"
+clients:
+  - token: "dev-secret"
+    endpoint_key: "dev"
+    listener:
+      type: "unix"
+      path: "/tmp/bifrost/dev.sock"
+      mode: "0600"
+    connection_policy:
+      mode: "replace_existing"
+    limits:
+      max_streams: 100
 
 logging:
   level: "info"

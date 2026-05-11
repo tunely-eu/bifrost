@@ -76,8 +76,7 @@ test_server_generates_config() {
     BIFROST_SERVER_LISTEN=":9443" \
     BIFROST_SERVER_TLS_CERT_FILE="/tls/server.crt" \
     BIFROST_SERVER_TLS_KEY_FILE="/tls/server.key" \
-    BIFROST_ACCEPT_CLIENTS_FILE="/data/clients.json" \
-    BIFROST_LISTENER_ALLOWED_UNIX_PREFIXES="/sock,/tmp/bifrost" \
+    BIFROST_SERVER_CLIENTS_JSON='[{"token":"secret","endpoint_key":"home","listener":{"type":"unix","path":"/sock/home.sock"}}]' \
     BIFROST_ADMIN_LISTEN="127.0.0.1:9000" \
     BIFROST_LOG_LEVEL="debug" \
     BIFROST_LOG_FORMAT="json" \
@@ -95,10 +94,9 @@ test_server_generates_config() {
   assert_eq ":9443" "$(jq -r '.server.listen' "$server_config")" "server listen"
   assert_eq "/tls/server.crt" "$(jq -r '.server.tls.cert_file' "$server_config")" "server cert file"
   assert_eq "/tls/server.key" "$(jq -r '.server.tls.key_file' "$server_config")" "server key file"
-  assert_eq "/usr/local/share/bifrost/accept-json.sh" "$(jq -r '.accept_hook.command' "$server_config")" "server hook"
-  assert_eq "/data/clients.json" "$(jq -r '.accept_hook.args[1]' "$server_config")" "server clients file"
-  assert_eq "/sock" "$(jq -r '.listener_policy.allowed_unix_prefixes[0]' "$server_config")" "server first unix prefix"
-  assert_eq "/tmp/bifrost" "$(jq -r '.listener_policy.allowed_unix_prefixes[1]' "$server_config")" "server second unix prefix"
+  assert_eq "secret" "$(jq -r '.clients[0].token' "$server_config")" "server client token"
+  assert_eq "home" "$(jq -r '.clients[0].endpoint_key' "$server_config")" "server client endpoint"
+  assert_eq "/sock/home.sock" "$(jq -r '.clients[0].listener.path' "$server_config")" "server client listener"
   assert_eq "127.0.0.1:9000" "$(jq -r '.admin.listen' "$server_config")" "server admin listen"
   assert_eq "debug" "$(jq -r '.logging.level' "$server_config")" "server log level"
   assert_eq "json" "$(jq -r '.logging.format' "$server_config")" "server log format"
@@ -195,6 +193,11 @@ test_ctl_passthrough() {
 }
 
 test_rejects_invalid_input() {
+  if BIFROST_GENERATED_CONFIG_DIR="$work_dir/invalid-server" run_entrypoint server >/dev/null 2>"$work_dir/err.log"; then
+    fail "server without required clients env should fail"
+  fi
+  assert_file_contains "$work_dir/err.log" "BIFROST_SERVER_CLIENTS_JSON is required" "server required env error"
+
   if BIFROST_GENERATED_CONFIG_DIR="$work_dir/invalid" run_entrypoint client >/dev/null 2>"$work_dir/err.log"; then
     fail "client without required env should fail"
   fi
