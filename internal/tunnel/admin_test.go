@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"bifrost/internal/metrics"
+	"github.com/tunely-eu/bifrost/internal/metrics"
 )
 
 func TestAdminHealthReadyMetrics(t *testing.T) {

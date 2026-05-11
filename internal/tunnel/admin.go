@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"time"
 
-	"bifrost/internal/metrics"
+	"github.com/tunely-eu/bifrost/internal/metrics"
 )
 
 func RunAdmin(ctx context.Context, listen string, ready func() bool, recorder metrics.Recorder, logger *slog.Logger) (net.Addr, error) {

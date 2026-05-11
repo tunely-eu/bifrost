@@ -8,9 +8,9 @@ import (
 	"os/signal"
 	"syscall"
 
-	"bifrost/internal/client"
-	"bifrost/internal/config"
-	"bifrost/internal/logging"
+	"github.com/tunely-eu/bifrost/internal/client"
+	"github.com/tunely-eu/bifrost/internal/config"
+	"github.com/tunely-eu/bifrost/internal/logging"
 )
 
 func main() {

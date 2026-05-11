@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"os"
 
-	"bifrost/internal/config"
+	"github.com/tunely-eu/bifrost/internal/config"
 )
 
 const version = "0.1.0-dev"

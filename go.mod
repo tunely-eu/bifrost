@@ -1,4 +1,4 @@
-module bifrost
+module github.com/tunely-eu/bifrost
 
 go 1.25
 
