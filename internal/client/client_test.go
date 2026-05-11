@@ -17,9 +17,9 @@ import (
 	"testing"
 	"time"
 
-	"bifrost/internal/config"
-	"bifrost/internal/multiplex"
-	"bifrost/internal/protocol"
+	"github.com/tunely-eu/bifrost/internal/config"
+	"github.com/tunely-eu/bifrost/internal/multiplex"
+	"github.com/tunely-eu/bifrost/internal/protocol"
 )
 
 func TestRunStopsOnContextCancelWhileWaitingForStreams(t *testing.T) {

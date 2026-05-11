@@ -12,20 +12,21 @@ import (
 	"os"
 	"time"
 
-	"bifrost/internal/config"
-	"bifrost/internal/header"
-	"bifrost/internal/logging"
-	"bifrost/internal/metrics"
-	"bifrost/internal/multiplex"
-	"bifrost/internal/pipe"
-	"bifrost/internal/protocol"
-	"bifrost/internal/tunnel"
+	"github.com/tunely-eu/bifrost/internal/config"
+	"github.com/tunely-eu/bifrost/internal/header"
+	"github.com/tunely-eu/bifrost/internal/logging"
+	"github.com/tunely-eu/bifrost/internal/metrics"
+	"github.com/tunely-eu/bifrost/internal/multiplex"
+	"github.com/tunely-eu/bifrost/internal/pipe"
+	"github.com/tunely-eu/bifrost/internal/protocol"
+	"github.com/tunely-eu/bifrost/internal/tunnel"
 )
 
 type Options struct {
-	Logger     *slog.Logger
-	Metrics    metrics.Recorder
-	AdminReady func(net.Addr)
+	Logger        *slog.Logger
+	Metrics       metrics.Recorder
+	StreamHandler func(context.Context, net.Conn)
+	AdminReady    func(net.Addr)
 }
 
 const (
@@ -35,7 +36,11 @@ const (
 
 func Run(ctx context.Context, cfg config.ClientConfig, opts Options) error {
 	cfg.ApplyDefaults()
-	if err := cfg.Validate(); err != nil {
+	if opts.StreamHandler == nil {
+		if err := cfg.Validate(); err != nil {
+			return err
+		}
+	} else if err := cfg.ValidateHandshake(); err != nil {
 		return err
 	}
 	logger := opts.Logger
@@ -65,7 +70,7 @@ func Run(ctx context.Context, cfg config.ClientConfig, opts Options) error {
 
 	backoff := reconnectInitialDelay
 	for {
-		err := runOnce(ctx, cfg, tlsConfig, logger, recorder)
+		err := runOnce(ctx, cfg, tlsConfig, logger, recorder, opts.StreamHandler)
 		if ctx.Err() != nil {
 			return nil
 		}
@@ -87,7 +92,7 @@ func Run(ctx context.Context, cfg config.ClientConfig, opts Options) error {
 	}
 }
 
-func runOnce(ctx context.Context, cfg config.ClientConfig, tlsConfig *tls.Config, logger *slog.Logger, recorder metrics.Recorder) error {
+func runOnce(ctx context.Context, cfg config.ClientConfig, tlsConfig *tls.Config, logger *slog.Logger, recorder metrics.Recorder, handler func(context.Context, net.Conn)) error {
 	var dialer net.Dialer
 	raw, err := dialer.DialContext(ctx, "tcp", cfg.Client.ServerURL)
 	if err != nil {
@@ -140,6 +145,13 @@ func runOnce(ctx context.Context, cfg config.ClientConfig, tlsConfig *tls.Config
 			return err
 		}
 		recorder.Inc("streams_started_total")
+		if handler != nil {
+			go func() {
+				handler(ctx, stream)
+				recorder.Inc("streams_ended_total")
+			}()
+			continue
+		}
 		go forwardStream(ctx, cfg.Client.Target.Address, stream, logger, recorder)
 	}
 }

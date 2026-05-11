@@ -25,9 +25,9 @@ entrypoint-test:
 
 build:
 	mkdir -p $(BIN_DIR)
-	$(GO) build -o $(BIN_DIR)/bifrost-server ./cmd/bifrost-server
-	$(GO) build -o $(BIN_DIR)/bifrost-client ./cmd/bifrost-client
-	$(GO) build -o $(BIN_DIR)/bifrostctl ./cmd/bifrostctl
+	$(GO) build -buildvcs=false -o $(BIN_DIR)/bifrost-server ./cmd/bifrost-server
+	$(GO) build -buildvcs=false -o $(BIN_DIR)/bifrost-client ./cmd/bifrost-client
+	$(GO) build -buildvcs=false -o $(BIN_DIR)/bifrostctl ./cmd/bifrostctl
 
 clean:
 	rm -rf $(BIN_DIR) dist
