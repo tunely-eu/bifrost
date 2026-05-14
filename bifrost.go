@@ -65,6 +65,7 @@ type Runtime struct {
 type ServerOptions struct {
 	Logger         *slog.Logger
 	AcceptProvider AcceptProvider
+	Listener       net.Listener
 	Ready          func(net.Addr)
 	AdminReady     func(net.Addr)
 }
@@ -83,6 +84,7 @@ func NewServer(cfg ServerConfig, opts ServerOptions) (*Server, error) {
 		Metrics:        metrics.NewMemory(),
 		AcceptProvider: opts.AcceptProvider,
 		TLSConfig:      cfg.TLSConfig,
+		Listener:       opts.Listener,
 		Ready:          opts.Ready,
 		AdminReady:     opts.AdminReady,
 	})

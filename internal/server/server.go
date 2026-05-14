@@ -28,6 +28,7 @@ type Options struct {
 	Metrics        metrics.Recorder
 	AcceptProvider acceptor.Provider
 	TLSConfig      *tls.Config
+	Listener       net.Listener
 	Ready          func(net.Addr)
 	AdminReady     func(net.Addr)
 	ListenerReady  func(endpointKey string, spec listener.Spec, addr net.Addr)
@@ -123,7 +124,7 @@ func (s *Server) Run(ctx context.Context) error {
 		return err
 	}
 
-	ln, err := net.Listen("tcp", s.cfg.Server.Listen)
+	ln, err := s.listener()
 	if err != nil {
 		return err
 	}
@@ -160,6 +161,13 @@ func (s *Server) Run(ctx context.Context) error {
 			s.handleTunnel(ctx, conn, tlsConfig)
 		}()
 	}
+}
+
+func (s *Server) listener() (net.Listener, error) {
+	if s.opts.Listener != nil {
+		return s.opts.Listener, nil
+	}
+	return net.Listen("tcp", s.cfg.Server.Listen)
 }
 
 func (s *Server) tlsConfig() (*tls.Config, error) {

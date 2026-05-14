@@ -173,6 +173,59 @@ func TestLibraryServerClientOpenStreamWithExternalTLSConfig(t *testing.T) {
 	expectCleanShutdown(t, clientErr, "client")
 }
 
+func TestLibraryServerUsesExternalListener(t *testing.T) {
+	dir := t.TempDir()
+	certFile, keyFile, _ := writeSelfSignedCert(t, dir)
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		t.Fatalf("load cert: %v", err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen external: %v", err)
+	}
+
+	serverReady := make(chan net.Addr, 1)
+	server, err := NewServer(ServerConfig{
+		Listen:    ln.Addr().String(),
+		TLSConfig: &tls.Config{Certificates: []tls.Certificate{cert}},
+		Clients: []StaticClient{
+			{
+				Token:       "secret",
+				EndpointKey: "home",
+				ConnectionPolicy: ConnectionPolicy{
+					Mode: PolicyReplaceExisting,
+				},
+				Limits: PlanLimits{
+					MaxStreams:               10,
+					MaxBandwidthBPS:          100_000_000,
+					StreamIdleTimeoutSeconds: 30,
+				},
+			},
+		},
+	}, ServerOptions{
+		Listener: ln,
+		Ready:    func(addr net.Addr) { serverReady <- addr },
+	})
+	if err != nil {
+		_ = ln.Close()
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	serverErr := make(chan error, 1)
+	go func() {
+		serverErr <- server.Run(ctx)
+	}()
+	serverAddr := waitAddr(t, serverReady, "server")
+	if serverAddr.String() != ln.Addr().String() {
+		t.Fatalf("ready addr = %q, want %q", serverAddr.String(), ln.Addr().String())
+	}
+
+	cancel()
+	expectCleanShutdown(t, serverErr, "server")
+}
+
 func waitStream(t *testing.T, server *Server, endpoint string) net.Conn {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
