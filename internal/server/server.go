@@ -27,6 +27,7 @@ type Options struct {
 	Logger         *slog.Logger
 	Metrics        metrics.Recorder
 	AcceptProvider acceptor.Provider
+	TLSConfig      *tls.Config
 	Ready          func(net.Addr)
 	AdminReady     func(net.Addr)
 	ListenerReady  func(endpointKey string, spec listener.Spec, addr net.Addr)
@@ -72,7 +73,10 @@ func Run(ctx context.Context, cfg config.ServerConfig, opts Options) error {
 
 func New(cfg config.ServerConfig, opts Options) (*Server, error) {
 	cfg.ApplyDefaults()
-	if err := cfg.ValidateWithProvider(opts.AcceptProvider != nil); err != nil {
+	if err := cfg.ValidateWithOptions(config.ValidationOptions{
+		ProviderConfigured:    opts.AcceptProvider != nil,
+		ExternalTLSConfigured: opts.TLSConfig != nil,
+	}); err != nil {
 		return nil, err
 	}
 	logger := opts.Logger
@@ -114,14 +118,9 @@ func (s *Server) Run(ctx context.Context) error {
 		s.opts.AdminReady(adminAddr)
 	}
 
-	cert, err := tls.LoadX509KeyPair(s.cfg.Server.TLS.CertFile, s.cfg.Server.TLS.KeyFile)
+	tlsConfig, err := s.tlsConfig()
 	if err != nil {
-		return fmt.Errorf("load server tls certificate: %w", err)
-	}
-	tlsConfig := &tls.Config{
-		Certificates: []tls.Certificate{cert},
-		MinVersion:   tls.VersionTLS12,
-		NextProtos:   []string{protocol.ALPN},
+		return err
 	}
 
 	ln, err := net.Listen("tcp", s.cfg.Server.Listen)
@@ -161,6 +160,35 @@ func (s *Server) Run(ctx context.Context) error {
 			s.handleTunnel(ctx, conn, tlsConfig)
 		}()
 	}
+}
+
+func (s *Server) tlsConfig() (*tls.Config, error) {
+	if s.opts.TLSConfig != nil {
+		cfg := s.opts.TLSConfig.Clone()
+		if cfg.MinVersion == 0 {
+			cfg.MinVersion = tls.VersionTLS12
+		}
+		cfg.NextProtos = appendALPN(cfg.NextProtos, protocol.ALPN)
+		return cfg, nil
+	}
+	cert, err := tls.LoadX509KeyPair(s.cfg.Server.TLS.CertFile, s.cfg.Server.TLS.KeyFile)
+	if err != nil {
+		return nil, fmt.Errorf("load server tls certificate: %w", err)
+	}
+	return &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		MinVersion:   tls.VersionTLS12,
+		NextProtos:   []string{protocol.ALPN},
+	}, nil
+}
+
+func appendALPN(nextProtos []string, proto string) []string {
+	for _, existing := range nextProtos {
+		if existing == proto {
+			return nextProtos
+		}
+	}
+	return append(nextProtos, proto)
 }
 
 func (s *Server) handleTunnel(parent context.Context, raw net.Conn, tlsConfig *tls.Config) {

@@ -2,6 +2,7 @@ package bifrost
 
 import (
 	"context"
+	"crypto/tls"
 	"log/slog"
 	"net"
 	"time"
@@ -13,11 +14,13 @@ import (
 	"github.com/tunely-eu/bifrost/internal/listener"
 	"github.com/tunely-eu/bifrost/internal/metrics"
 	"github.com/tunely-eu/bifrost/internal/pipe"
+	"github.com/tunely-eu/bifrost/internal/protocol"
 	"github.com/tunely-eu/bifrost/internal/server"
 )
 
 const (
 	TokenHeader = acceptor.TokenHeader
+	ALPN        = protocol.ALPN
 
 	PolicyRejectIfExists  = acceptor.PolicyRejectIfExists
 	PolicyReplaceExisting = acceptor.PolicyReplaceExisting
@@ -35,6 +38,7 @@ type ServerConfig struct {
 	Listen      string
 	TLSCertFile string
 	TLSKeyFile  string
+	TLSConfig   *tls.Config
 	Clients     []StaticClient
 	Guardrails  Guardrails
 	Runtime     Runtime
@@ -78,6 +82,7 @@ func NewServer(cfg ServerConfig, opts ServerOptions) (*Server, error) {
 		Logger:         opts.Logger,
 		Metrics:        metrics.NewMemory(),
 		AcceptProvider: opts.AcceptProvider,
+		TLSConfig:      cfg.TLSConfig,
 		Ready:          opts.Ready,
 		AdminReady:     opts.AdminReady,
 	})

@@ -61,3 +61,14 @@ func TestServerConfigValidation(t *testing.T) {
 		t.Fatal("expected missing cert_file error")
 	}
 }
+
+func TestServerConfigValidationAllowsExternalTLS(t *testing.T) {
+	cfg := DefaultServerConfig()
+	cfg.Server.TLS.CertFile = ""
+	cfg.Server.TLS.KeyFile = ""
+	cfg.Clients = []Client{{Token: "secret", EndpointKey: "home"}}
+	cfg.ApplyDefaults()
+	if err := cfg.ValidateWithOptions(ValidationOptions{ExternalTLSConfigured: true}); err != nil {
+		t.Fatalf("ValidateWithOptions: %v", err)
+	}
+}

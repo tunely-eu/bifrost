@@ -281,14 +281,25 @@ func (c ServerConfig) Validate() error {
 }
 
 func (c ServerConfig) ValidateWithProvider(providerConfigured bool) error {
+	return c.ValidateWithOptions(ValidationOptions{ProviderConfigured: providerConfigured})
+}
+
+type ValidationOptions struct {
+	ProviderConfigured    bool
+	ExternalTLSConfigured bool
+}
+
+func (c ServerConfig) ValidateWithOptions(opts ValidationOptions) error {
 	if c.Server.Listen == "" {
 		return fmt.Errorf("server.listen is required")
 	}
-	if c.Server.TLS.CertFile == "" {
-		return fmt.Errorf("server.tls.cert_file is required")
-	}
-	if c.Server.TLS.KeyFile == "" {
-		return fmt.Errorf("server.tls.key_file is required")
+	if !opts.ExternalTLSConfigured {
+		if c.Server.TLS.CertFile == "" {
+			return fmt.Errorf("server.tls.cert_file is required")
+		}
+		if c.Server.TLS.KeyFile == "" {
+			return fmt.Errorf("server.tls.key_file is required")
+		}
 	}
 	if c.Guardrails.MaxSessions <= 0 {
 		return fmt.Errorf("guardrails.max_sessions must be positive")
@@ -311,10 +322,10 @@ func (c ServerConfig) ValidateWithProvider(providerConfigured bool) error {
 	if c.Guardrails.MaxHeaderBytes <= 0 {
 		return fmt.Errorf("guardrails.max_header_bytes must be positive")
 	}
-	if !providerConfigured && len(c.Clients) == 0 {
+	if !opts.ProviderConfigured && len(c.Clients) == 0 {
 		return fmt.Errorf("clients is required")
 	}
-	if !providerConfigured {
+	if !opts.ProviderConfigured {
 		if _, err := acceptor.NewStaticProvider(c.StaticClients()); err != nil {
 			return err
 		}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
@@ -29,6 +30,85 @@ func TestLibraryServerClientOpenStream(t *testing.T) {
 		Listen:      "127.0.0.1:0",
 		TLSCertFile: certFile,
 		TLSKeyFile:  keyFile,
+		Clients: []StaticClient{
+			{
+				Token:       "secret",
+				EndpointKey: "home",
+				ConnectionPolicy: ConnectionPolicy{
+					Mode: PolicyReplaceExisting,
+				},
+				Limits: PlanLimits{
+					MaxStreams:               10,
+					MaxBandwidthBPS:          100_000_000,
+					StreamIdleTimeoutSeconds: 30,
+				},
+			},
+		},
+	}, ServerOptions{Ready: func(addr net.Addr) { serverReady <- addr }})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	serverErr := make(chan error, 1)
+	go func() {
+		serverErr <- server.Run(ctx)
+	}()
+	serverAddr := waitAddr(t, serverReady, "server")
+
+	clientErr := make(chan error, 1)
+	go func() {
+		clientErr <- RunClient(ctx, ClientConfig{
+			ServerURL:     serverAddr.String(),
+			Headers:       map[string]string{TokenHeader: "secret"},
+			TLSCAFile:     caFile,
+			TLSServerName: "localhost",
+		}, ClientOptions{
+			StreamHandler: func(ctx context.Context, stream net.Conn) {
+				target, err := (&net.Dialer{}).DialContext(ctx, "tcp", targetAddr)
+				if err != nil {
+					_ = stream.Close()
+					return
+				}
+				Copy(ctx, stream, target, CopyOptions{})
+			},
+		})
+	}()
+
+	stream := waitStream(t, server, "home")
+	if _, err := stream.Write([]byte("hello")); err != nil {
+		t.Fatalf("write stream: %v", err)
+	}
+	buf := make([]byte, 5)
+	if _, err := io.ReadFull(stream, buf); err != nil {
+		t.Fatalf("read stream: %v", err)
+	}
+	if string(buf) != "hello" {
+		t.Fatalf("echo = %q", buf)
+	}
+	_ = stream.Close()
+
+	cancel()
+	expectCleanShutdown(t, serverErr, "server")
+	expectCleanShutdown(t, clientErr, "client")
+}
+
+func TestLibraryServerClientOpenStreamWithExternalTLSConfig(t *testing.T) {
+	targetAddr, stopTarget := startEchoTarget(t)
+	defer stopTarget()
+
+	dir := t.TempDir()
+	certFile, keyFile, caFile := writeSelfSignedCert(t, dir)
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		t.Fatalf("load cert: %v", err)
+	}
+
+	serverReady := make(chan net.Addr, 1)
+	server, err := NewServer(ServerConfig{
+		Listen:    "127.0.0.1:0",
+		TLSConfig: &tls.Config{Certificates: []tls.Certificate{cert}},
 		Clients: []StaticClient{
 			{
 				Token:       "secret",
