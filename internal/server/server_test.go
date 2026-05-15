@@ -24,6 +24,7 @@ import (
 	"github.com/tunely-eu/bifrost/internal/config"
 	"github.com/tunely-eu/bifrost/internal/limits"
 	"github.com/tunely-eu/bifrost/internal/listener"
+	"github.com/tunely-eu/bifrost/internal/metrics"
 	"github.com/tunely-eu/bifrost/internal/protocol"
 	"github.com/tunely-eu/bifrost/internal/server"
 )
@@ -42,6 +43,7 @@ func TestTunnelForwardsBytesOverTLSUnixSocket(t *testing.T) {
 	serverReady := make(chan net.Addr, 1)
 	listenerReady := make(chan listener.Spec, 1)
 	serverErr := make(chan error, 1)
+	observer := metrics.NewMemory()
 	go func() {
 		serverErr <- server.Run(ctx, serverConfig(certFile, keyFile, config.Client{
 			Token:       "dev-secret",
@@ -54,7 +56,8 @@ func TestTunnelForwardsBytesOverTLSUnixSocket(t *testing.T) {
 			ConnectionPolicy: acceptor.ConnectionPolicy{Mode: acceptor.PolicyReplaceExisting},
 			Limits:           testPlanLimits(50),
 		}), server.Options{
-			Logger: discardLogger(),
+			Logger:   discardLogger(),
+			Observer: observer,
 			Ready: func(addr net.Addr) {
 				serverReady <- addr
 			},
@@ -74,7 +77,16 @@ func TestTunnelForwardsBytesOverTLSUnixSocket(t *testing.T) {
 	if spec.Path != socketPath {
 		t.Fatalf("listener path = %q", spec.Path)
 	}
-	assertRoundTrip(t, "unix", socketPath, []byte("hello over bifrost"))
+	payload := []byte("hello over bifrost")
+	assertRoundTrip(t, "unix", socketPath, payload)
+	waitMetricValue(t, observer, "endpoint_stream_bytes_total", map[string]string{
+		"endpoint_key": "dev",
+		"direction":    string(metrics.DirectionIngressToEndpoint),
+	}, float64(len(payload)))
+	waitMetricValue(t, observer, "endpoint_stream_bytes_total", map[string]string{
+		"endpoint_key": "dev",
+		"direction":    string(metrics.DirectionEndpointToIngress),
+	}, float64(len(payload)))
 
 	errs := make(chan error, 8)
 	for i := 0; i < 8; i++ {
@@ -466,6 +478,30 @@ func waitUntil(t *testing.T, timeout time.Duration, condition func() bool, name 
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("timed out waiting for %s", name)
+}
+
+func waitMetricValue(t *testing.T, observer *metrics.Memory, name string, labels map[string]string, value float64) {
+	t.Helper()
+	waitUntil(t, 2*time.Second, func() bool {
+		for _, sample := range observer.Snapshot() {
+			if sample.Name == name && metricLabelsEqual(sample.Labels, labels) && sample.Value == value {
+				return true
+			}
+		}
+		return false
+	}, name)
+}
+
+func metricLabelsEqual(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for key, value := range a {
+		if b[key] != value {
+			return false
+		}
+	}
+	return true
 }
 
 func expectCleanShutdown(t *testing.T, ch <-chan error, name string) {

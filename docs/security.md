@@ -38,6 +38,10 @@ Important limits include:
 - minimum and maximum stream idle timeout
 - maximum header count and header bytes
 
+## Metrics Labels
+
+Bifrost metrics use endpoint keys and controlled reason/direction values only. Tokens, remote addresses, application paths, and SNI names are not used as metric labels.
+
 ## Known Non-Goals
 
 Bifrost does not defend against volumetric DDoS.

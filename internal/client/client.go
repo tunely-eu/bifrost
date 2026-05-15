@@ -24,7 +24,7 @@ import (
 
 type Options struct {
 	Logger        *slog.Logger
-	Metrics       metrics.Recorder
+	Observer      metrics.Observer
 	StreamHandler func(context.Context, net.Conn)
 	AdminReady    func(net.Addr)
 }
@@ -51,11 +51,18 @@ func Run(ctx context.Context, cfg config.ClientConfig, opts Options) error {
 			return err
 		}
 	}
-	recorder := opts.Metrics
-	if recorder == nil {
-		recorder = metrics.NewMemory()
+	observer := opts.Observer
+	if observer == nil {
+		if cfg.Admin.Listen != "" {
+			observer = metrics.NewMemory()
+		} else {
+			observer = metrics.Noop{}
+		}
+	} else if cfg.Admin.Listen != "" {
+		observer = metrics.NewMulti(metrics.NewMemory(), observer)
 	}
-	adminAddr, err := tunnel.RunAdmin(ctx, cfg.Admin.Listen, func() bool { return true }, recorder, logger)
+	observer.Ready(true)
+	adminAddr, err := tunnel.RunAdmin(ctx, cfg.Admin.Listen, func() bool { return true }, observer, logger)
 	if err != nil {
 		return err
 	}
@@ -70,18 +77,19 @@ func Run(ctx context.Context, cfg config.ClientConfig, opts Options) error {
 
 	backoff := reconnectInitialDelay
 	for {
-		err := runOnce(ctx, cfg, tlsConfig, logger, recorder, opts.StreamHandler)
+		err := runOnce(ctx, cfg, tlsConfig, logger, observer, opts.StreamHandler)
 		if ctx.Err() != nil {
+			observer.Ready(false)
 			return nil
 		}
 		logger.Warn("tunnel disconnected", "error", err)
-		recorder.Inc("reconnects_total")
 
 		delay := jitter(backoff)
 		timer := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
+			observer.Ready(false)
 			return nil
 		case <-timer.C:
 		}
@@ -92,10 +100,12 @@ func Run(ctx context.Context, cfg config.ClientConfig, opts Options) error {
 	}
 }
 
-func runOnce(ctx context.Context, cfg config.ClientConfig, tlsConfig *tls.Config, logger *slog.Logger, recorder metrics.Recorder, handler func(context.Context, net.Conn)) error {
+func runOnce(ctx context.Context, cfg config.ClientConfig, tlsConfig *tls.Config, logger *slog.Logger, observer metrics.Observer, handler func(context.Context, net.Conn)) error {
 	var dialer net.Dialer
+	observer.ConnectionAttempted()
 	raw, err := dialer.DialContext(ctx, "tcp", cfg.Client.ServerURL)
 	if err != nil {
+		observer.ConnectionRejected(metrics.RejectConnect)
 		return err
 	}
 	defer raw.Close()
@@ -105,30 +115,36 @@ func runOnce(ctx context.Context, cfg config.ClientConfig, tlsConfig *tls.Config
 	conn := tls.Client(raw, tlsConfig)
 	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
 	if err := conn.HandshakeContext(ctx); err != nil {
+		observer.ConnectionRejected(metrics.RejectTLSHandshake)
 		return fmt.Errorf("tls handshake: %w", err)
 	}
 	if conn.ConnectionState().NegotiatedProtocol != protocol.ALPN {
+		observer.ConnectionRejected(metrics.RejectALPN)
 		return fmt.Errorf("server negotiated unsupported alpn %q", conn.ConnectionState().NegotiatedProtocol)
 	}
 
 	headers, err := header.Normalize(cfg.Client.Headers, 32, 8192)
 	if err != nil {
+		observer.ConnectionRejected(metrics.RejectHeaders)
 		return err
 	}
 	if err := protocol.WriteJSONLine(conn, protocol.Hello{
 		ProtocolVersion: protocol.Version,
 		Headers:         headers,
 	}, protocol.DefaultMaxLineBytes); err != nil {
+		observer.ConnectionRejected(metrics.RejectInvalidHello)
 		return err
 	}
 	var response protocol.Response
 	if err := protocol.ReadJSONLine(conn, &response, protocol.DefaultMaxLineBytes); err != nil {
+		observer.ConnectionRejected(metrics.RejectInvalidHello)
 		return err
 	}
 	if !response.Accepted {
 		if response.Reason == "" {
 			response.Reason = "server rejected client"
 		}
+		observer.ConnectionRejected(metrics.RejectDecision)
 		return errors.New(response.Reason)
 	}
 	_ = conn.SetDeadline(time.Time{})
@@ -144,19 +160,27 @@ func runOnce(ctx context.Context, cfg config.ClientConfig, tlsConfig *tls.Config
 		if err != nil {
 			return err
 		}
-		recorder.Inc("streams_started_total")
+		streamObserver := observer.StreamStarted("")
+		if streamObserver == nil {
+			streamObserver = metrics.NoopStream{}
+		}
 		if handler != nil {
 			go func() {
+				defer streamObserver.End()
 				handler(ctx, stream)
-				recorder.Inc("streams_ended_total")
 			}()
 			continue
 		}
-		go forwardStream(ctx, cfg.Client.Target.Address, stream, logger, recorder)
+		go forwardStream(ctx, cfg.Client.Target.Address, stream, logger, streamObserver)
 	}
 }
 
-func forwardStream(ctx context.Context, targetAddr string, stream net.Conn, logger *slog.Logger, recorder metrics.Recorder) {
+func forwardStream(ctx context.Context, targetAddr string, stream net.Conn, logger *slog.Logger, streamObserver metrics.StreamObserver) {
+	if streamObserver == nil {
+		streamObserver = metrics.NoopStream{}
+	}
+	defer streamObserver.End()
+
 	var dialer net.Dialer
 	target, err := dialer.DialContext(ctx, "tcp", targetAddr)
 	if err != nil {
@@ -168,10 +192,20 @@ func forwardStream(ctx context.Context, targetAddr string, stream net.Conn, logg
 	defer doneStream()
 	pipe.ProxyWithOptions(ctx, stream, target, pipe.Options{
 		OnBytes: func(direction string, n int64) {
-			recorder.Add("bytes_total", float64(n))
+			streamObserver.AddBytes(mapClientDirection(direction), n)
 		},
 	})
-	recorder.Inc("streams_ended_total")
+}
+
+func mapClientDirection(direction string) metrics.Direction {
+	switch direction {
+	case "a_to_b":
+		return metrics.DirectionIngressToEndpoint
+	case "b_to_a":
+		return metrics.DirectionEndpointToIngress
+	default:
+		return metrics.Direction(direction)
+	}
 }
 
 func closeOnContext(ctx context.Context, conns ...net.Conn) func() {

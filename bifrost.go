@@ -33,6 +33,20 @@ type AcceptDecision = acceptor.Decision
 type StaticClient = acceptor.StaticClient
 type ConnectionPolicy = acceptor.ConnectionPolicy
 type PlanLimits = limits.PlanLimits
+type Observer = metrics.Observer
+type StreamObserver = metrics.StreamObserver
+type Direction = metrics.Direction
+type NoopObserver = metrics.Noop
+type NoopStreamObserver = metrics.NoopStream
+
+const (
+	DirectionIngressToEndpoint = metrics.DirectionIngressToEndpoint
+	DirectionEndpointToIngress = metrics.DirectionEndpointToIngress
+)
+
+func NewMultiObserver(observers ...Observer) Observer {
+	return metrics.NewMulti(observers...)
+}
 
 type ServerConfig struct {
 	Listen      string
@@ -65,6 +79,7 @@ type Runtime struct {
 type ServerOptions struct {
 	Logger         *slog.Logger
 	AcceptProvider AcceptProvider
+	Observer       Observer
 	Listener       net.Listener
 	Ready          func(net.Addr)
 	AdminReady     func(net.Addr)
@@ -81,7 +96,7 @@ func NewStaticAcceptProvider(clients []StaticClient) (AcceptProvider, error) {
 func NewServer(cfg ServerConfig, opts ServerOptions) (*Server, error) {
 	inner, err := server.New(toInternalServerConfig(cfg), server.Options{
 		Logger:         opts.Logger,
-		Metrics:        metrics.NewMemory(),
+		Observer:       opts.Observer,
 		AcceptProvider: opts.AcceptProvider,
 		TLSConfig:      cfg.TLSConfig,
 		Listener:       opts.Listener,
@@ -126,6 +141,7 @@ type ClientConfig struct {
 
 type ClientOptions struct {
 	Logger        *slog.Logger
+	Observer      Observer
 	StreamHandler func(context.Context, net.Conn)
 	AdminReady    func(net.Addr)
 }
@@ -133,7 +149,7 @@ type ClientOptions struct {
 func RunClient(ctx context.Context, cfg ClientConfig, opts ClientOptions) error {
 	return client.Run(ctx, toInternalClientConfig(cfg), client.Options{
 		Logger:        opts.Logger,
-		Metrics:       metrics.NewMemory(),
+		Observer:      opts.Observer,
 		StreamHandler: opts.StreamHandler,
 		AdminReady:    opts.AdminReady,
 	})

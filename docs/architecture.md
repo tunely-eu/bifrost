@@ -50,4 +50,4 @@ This keeps reconnection behavior explicit and reviewable in hook output instead 
 
 The accept hook is the primary extension point. It can be a shell script, a compiled binary, or a wrapper around an internal control plane. The hook can read any backing store it wants as long as it writes a valid decision JSON object to stdout.
 
-Metrics and logging are intentionally narrow internal interfaces. The current runtime exposes readiness and Prometheus-style metrics through the optional admin listener; richer collectors can be added without changing the transport contract.
+Metrics and logging are intentionally narrow internal interfaces. The runtime emits typed observer events for readiness, sessions, streams, rejects, and copied bytes. The standalone binaries aggregate those events for the optional admin `/metrics` endpoint, while embedded users can attach their own observer without changing the transport contract.

@@ -172,7 +172,7 @@ The server config has a top-level `clients` array. Each item describes one accep
 | `clients[].limits.max_streams` | int | Maximum concurrent streams for the session. Checked against server guardrails. |
 | `clients[].limits.max_bandwidth_bps` | int | Session bandwidth limit in bytes per second. Checked against server guardrails. |
 | `clients[].limits.stream_idle_timeout_seconds` | int | Stream idle timeout in seconds. Checked against server guardrails. |
-| `clients[].labels` | map of string to string | Optional metadata for logs, metrics, or external hook implementations. |
+| `clients[].labels` | map of string to string | Optional metadata for logs or external hook implementations. |
 
 Missing client limits use plan defaults before guardrail checks: `max_streams` defaults to `100`, `max_bandwidth_bps` defaults to `25000000`, and `stream_idle_timeout_seconds` defaults to `300`.
 
@@ -186,5 +186,15 @@ When `admin.listen` is set, Bifrost exposes:
 
 - `/readyz`: readiness status.
 - `/metrics`: Prometheus-style text metrics.
+
+The metrics include global runtime counters and endpoint-level stream/session counters:
+
+- `bifrost_endpoint_active_sessions{endpoint_key}`
+- `bifrost_endpoint_streams_started_total{endpoint_key}`
+- `bifrost_endpoint_streams_ended_total{endpoint_key}`
+- `bifrost_endpoint_streams_rejected_total{endpoint_key,reason}`
+- `bifrost_endpoint_stream_bytes_total{endpoint_key,direction}`
+
+`direction` is reported from the server side as `ingress_to_endpoint` or `endpoint_to_ingress`. Metrics labels intentionally use stable endpoint and reason values only.
 
 Bind the admin listener to a private interface, loopback address, or protected network segment.

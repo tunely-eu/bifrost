@@ -10,7 +10,7 @@ import (
 	"github.com/tunely-eu/bifrost/internal/metrics"
 )
 
-func RunAdmin(ctx context.Context, listen string, ready func() bool, recorder metrics.Recorder, logger *slog.Logger) (net.Addr, error) {
+func RunAdmin(ctx context.Context, listen string, ready func() bool, observer metrics.Observer, logger *slog.Logger) (net.Addr, error) {
 	if listen == "" {
 		return nil, nil
 	}
@@ -27,7 +27,7 @@ func RunAdmin(ctx context.Context, listen string, ready func() bool, recorder me
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ready\n"))
 	})
-	mux.Handle("/metrics", metrics.Handler(recorder))
+	mux.Handle("/metrics", metrics.Handler(observer))
 
 	ln, err := net.Listen("tcp", listen)
 	if err != nil {

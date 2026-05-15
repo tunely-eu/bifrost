@@ -14,7 +14,7 @@ func TestAdminHealthReadyMetrics(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	rec := metrics.NewMemory()
-	rec.Inc("connection_attempts_total")
+	rec.ConnectionAttempted()
 	addr, err := RunAdmin(ctx, "127.0.0.1:0", func() bool { return true }, rec, nil)
 	if err != nil {
 		t.Fatalf("RunAdmin: %v", err)

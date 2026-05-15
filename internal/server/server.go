@@ -25,7 +25,7 @@ import (
 
 type Options struct {
 	Logger         *slog.Logger
-	Metrics        metrics.Recorder
+	Observer       metrics.Observer
 	AcceptProvider acceptor.Provider
 	TLSConfig      *tls.Config
 	Listener       net.Listener
@@ -35,11 +35,11 @@ type Options struct {
 }
 
 type Server struct {
-	cfg     config.ServerConfig
-	opts    Options
-	logger  *slog.Logger
-	metrics metrics.Recorder
-	accept  acceptor.Provider
+	cfg      config.ServerConfig
+	opts     Options
+	logger   *slog.Logger
+	observer metrics.Observer
+	accept   acceptor.Provider
 
 	mu       sync.Mutex
 	wg       sync.WaitGroup
@@ -88,9 +88,15 @@ func New(cfg config.ServerConfig, opts Options) (*Server, error) {
 			return nil, err
 		}
 	}
-	recorder := opts.Metrics
-	if recorder == nil {
-		recorder = metrics.NewMemory()
+	observer := opts.Observer
+	if observer == nil {
+		if cfg.Admin.Listen != "" {
+			observer = metrics.NewMemory()
+		} else {
+			observer = metrics.Noop{}
+		}
+	} else if cfg.Admin.Listen != "" {
+		observer = metrics.NewMulti(metrics.NewMemory(), observer)
 	}
 	provider := opts.AcceptProvider
 	if provider == nil {
@@ -104,14 +110,14 @@ func New(cfg config.ServerConfig, opts Options) (*Server, error) {
 		cfg:      cfg,
 		opts:     opts,
 		logger:   logger,
-		metrics:  recorder,
+		observer: observer,
 		accept:   provider,
 		sessions: make(map[string][]*managedSession),
 	}, nil
 }
 
 func (s *Server) Run(ctx context.Context) error {
-	adminAddr, err := tunnel.RunAdmin(ctx, s.cfg.Admin.Listen, s.ready.Load, s.metrics, s.logger)
+	adminAddr, err := tunnel.RunAdmin(ctx, s.cfg.Admin.Listen, s.ready.Load, s.observer, s.logger)
 	if err != nil {
 		return err
 	}
@@ -130,7 +136,7 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 	defer ln.Close()
 	s.ready.Store(true)
-	s.metrics.Set("ready", 1)
+	s.observer.Ready(true)
 	if s.opts.Ready != nil {
 		s.opts.Ready(ln.Addr())
 	}
@@ -138,7 +144,7 @@ func (s *Server) Run(ctx context.Context) error {
 	go func() {
 		<-ctx.Done()
 		s.ready.Store(false)
-		s.metrics.Set("ready", 0)
+		s.observer.Ready(false)
 		_ = ln.Close()
 	}()
 
@@ -154,7 +160,7 @@ func (s *Server) Run(ctx context.Context) error {
 			s.wg.Wait()
 			return err
 		}
-		s.metrics.Inc("connection_attempts_total")
+		s.observer.ConnectionAttempted()
 		s.wg.Add(1)
 		go func() {
 			defer s.wg.Done()
@@ -212,27 +218,30 @@ func (s *Server) handleTunnel(parent context.Context, raw net.Conn, tlsConfig *t
 	conn := tls.Server(raw, tlsConfig)
 	if err := conn.HandshakeContext(sessionCtx); err != nil {
 		s.logger.Warn("tls handshake failed", "remote_addr", raw.RemoteAddr().String(), "error", err)
-		s.metrics.Inc("tls_handshake_errors_total")
+		s.observer.ConnectionRejected(metrics.RejectTLSHandshake)
 		return
 	}
 	if conn.ConnectionState().NegotiatedProtocol != protocol.ALPN {
 		s.logger.Warn("unsupported alpn", "remote_addr", raw.RemoteAddr().String(), "alpn", conn.ConnectionState().NegotiatedProtocol)
-		s.metrics.Inc("alpn_rejections_total")
+		s.observer.ConnectionRejected(metrics.RejectALPN)
 		return
 	}
 
 	var hello protocol.Hello
 	if err := protocol.ReadJSONLine(conn, &hello, s.cfg.Guardrails.MaxHeaderBytes); err != nil {
+		s.observer.ConnectionRejected(metrics.RejectInvalidHello)
 		s.reject(conn, "invalid handshake")
 		s.logger.Warn("read bifrost hello failed", "remote_addr", raw.RemoteAddr().String(), "error", err)
 		return
 	}
 	if hello.ProtocolVersion != protocol.Version {
+		s.observer.ConnectionRejected(metrics.RejectProtocolVersion)
 		s.reject(conn, "unsupported protocol version")
 		return
 	}
 	headers, err := header.Normalize(hello.Headers, s.cfg.Guardrails.MaxHeaders, s.cfg.Guardrails.MaxHeaderBytes)
 	if err != nil {
+		s.observer.ConnectionRejected(metrics.RejectHeaders)
 		s.reject(conn, err.Error())
 		return
 	}
@@ -247,11 +256,13 @@ func (s *Server) handleTunnel(parent context.Context, raw net.Conn, tlsConfig *t
 		Timestamp:       time.Now().UTC().Format(time.RFC3339),
 	})
 	if err != nil {
+		s.observer.ConnectionRejected(metrics.RejectAcceptProvider)
 		s.reject(conn, err.Error())
 		return
 	}
 	decision, err = acceptor.ValidateDecision(decision, s.cfg.Guardrails.ToLimits())
 	if err != nil {
+		s.observer.ConnectionRejected(metrics.RejectDecision)
 		s.reject(conn, err.Error())
 		return
 	}
@@ -260,7 +271,7 @@ func (s *Server) handleTunnel(parent context.Context, raw net.Conn, tlsConfig *t
 		if reason == "" {
 			reason = "client rejected"
 		}
-		s.metrics.Inc("accept_rejections_total")
+		s.observer.ConnectionRejected(metrics.RejectDecision)
 		s.reject(conn, reason)
 		return
 	}
@@ -286,6 +297,7 @@ func (s *Server) handleTunnel(parent context.Context, raw net.Conn, tlsConfig *t
 
 	previous, err := s.registerSession(managed, decision.ConnectionPolicy)
 	if err != nil {
+		s.observer.ConnectionRejected(metrics.RejectDecision)
 		s.reject(conn, err.Error())
 		return
 	}
@@ -302,11 +314,11 @@ func (s *Server) handleTunnel(parent context.Context, raw net.Conn, tlsConfig *t
 	if hasListener {
 		ln, err := listener.Listen(listenerSpec, s.listenerOptions())
 		if err != nil {
+			s.observer.ConnectionRejected(metrics.RejectListener)
 			s.reject(conn, err.Error())
 			return
 		}
 		managed.listener = ln
-		s.metrics.Inc("listeners_opened_total")
 		if s.opts.ListenerReady != nil {
 			s.opts.ListenerReady(decision.EndpointKey, listenerSpec, ln.Addr())
 		}
@@ -353,13 +365,13 @@ func (s *Server) registerSession(session *managedSession, policy acceptor.Connec
 	}
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	current := append([]*managedSession(nil), s.sessions[session.endpointKey]...)
 	var replaced []*managedSession
 	switch policy.Mode {
 	case acceptor.PolicyRejectIfExists:
 		if len(current) > 0 {
+			s.mu.Unlock()
 			return nil, fmt.Errorf("endpoint_key %q already has an active session", session.endpointKey)
 		}
 	case acceptor.PolicyReplaceExisting:
@@ -370,21 +382,27 @@ func (s *Server) registerSession(session *managedSession, policy acceptor.Connec
 		}
 	case acceptor.PolicyAllowParallel:
 		if len(current) >= policy.MaxParallel {
+			s.mu.Unlock()
 			return nil, fmt.Errorf("endpoint_key %q reached max_parallel %d", session.endpointKey, policy.MaxParallel)
 		}
 	}
 	if s.active >= s.cfg.Guardrails.MaxSessions {
+		s.mu.Unlock()
 		return nil, fmt.Errorf("server reached max_sessions %d", s.cfg.Guardrails.MaxSessions)
 	}
 	s.sessions[session.endpointKey] = append(s.sessions[session.endpointKey], session)
 	s.active++
-	s.metrics.Set("active_sessions", float64(s.active))
+	s.mu.Unlock()
+
+	for _, prev := range replaced {
+		s.observer.SessionEnded(prev.endpointKey)
+	}
+	s.observer.SessionStarted(session.endpointKey)
 	return replaced, nil
 }
 
 func (s *Server) unregisterSession(session *managedSession) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	list := s.sessions[session.endpointKey]
 	for i, item := range list {
@@ -396,10 +414,13 @@ func (s *Server) unregisterSession(session *managedSession) {
 				s.sessions[session.endpointKey] = list
 			}
 			s.active--
-			s.metrics.Set("active_sessions", float64(s.active))
+			endpointKey := session.endpointKey
+			s.mu.Unlock()
+			s.observer.SessionEnded(endpointKey)
 			return
 		}
 	}
+	s.mu.Unlock()
 }
 
 func (s *Server) acceptIngress(ctx context.Context, session *managedSession) {
@@ -427,6 +448,7 @@ func (s *Server) forwardIngress(ctx context.Context, session *managedSession, in
 func (s *Server) ProxyStream(ctx context.Context, endpointKey string, ingressConn net.Conn) error {
 	session, err := s.sessionForEndpoint(endpointKey)
 	if err != nil {
+		s.observer.StreamRejected(endpointKey, metrics.RejectNoSession)
 		_ = ingressConn.Close()
 		return err
 	}
@@ -443,17 +465,14 @@ func (s *Server) proxySessionStream(ctx context.Context, session *managedSession
 		BufferSize:  limits.BufferSize(s.cfg.Runtime.StreamCopyBufferBytes),
 		IdleTimeout: session.limits.StreamIdleTimeout(),
 		Limiter:     session.limiter,
-		OnBytes: func(direction string, n int64) {
-			s.metrics.Add("bytes_total", float64(n))
-		},
 	})
-	s.metrics.Inc("streams_ended_total")
 	return nil
 }
 
 func (s *Server) OpenStream(ctx context.Context, endpointKey string) (net.Conn, error) {
 	session, err := s.sessionForEndpoint(endpointKey)
 	if err != nil {
+		s.observer.StreamRejected(endpointKey, metrics.RejectNoSession)
 		return nil, err
 	}
 	return s.openStream(ctx, session)
@@ -469,37 +488,73 @@ func (s *Server) sessionForEndpoint(endpointKey string) (*managedSession, error)
 	return sessions[len(sessions)-1], nil
 }
 
-func (s *Server) openStream(ctx context.Context, session *managedSession) (net.Conn, error) {
+func (s *Server) openStream(ctx context.Context, session *managedSession) (*managedStream, error) {
 	mux, err := session.waitMux(ctx)
 	if err != nil {
+		s.observer.StreamRejected(session.endpointKey, metrics.RejectSessionNotReady)
 		return nil, err
 	}
 	if !session.acquireStream() {
-		s.metrics.Inc("limit_violations_total")
+		s.observer.StreamRejected(session.endpointKey, metrics.RejectStreamLimit)
 		return nil, fmt.Errorf("endpoint_key %q reached stream limit", session.endpointKey)
 	}
 	stream, err := mux.Open()
 	if err != nil {
 		session.releaseStream()
+		s.observer.StreamRejected(session.endpointKey, metrics.RejectStreamOpen)
 		return nil, err
 	}
-	s.metrics.Inc("streams_started_total")
+	streamObserver := s.observer.StreamStarted(session.endpointKey)
+	if streamObserver == nil {
+		streamObserver = metrics.NoopStream{}
+	}
 	return &managedStream{
-		Conn:    stream,
-		release: session.releaseStream,
+		Conn:     stream,
+		observer: streamObserver,
+		release:  session.releaseStream,
 	}, nil
 }
 
 type managedStream struct {
 	net.Conn
-	once    sync.Once
-	release func()
+	observer metrics.StreamObserver
+	once     sync.Once
+	release  func()
+}
+
+func (s *managedStream) Read(p []byte) (int, error) {
+	n, err := s.Conn.Read(p)
+	if n > 0 {
+		s.AddBytes(metrics.DirectionEndpointToIngress, int64(n))
+	}
+	return n, err
+}
+
+func (s *managedStream) Write(p []byte) (int, error) {
+	n, err := s.Conn.Write(p)
+	if n > 0 {
+		s.AddBytes(metrics.DirectionIngressToEndpoint, int64(n))
+	}
+	return n, err
 }
 
 func (s *managedStream) Close() error {
 	err := s.Conn.Close()
-	s.once.Do(s.release)
+	s.once.Do(func() {
+		if s.release != nil {
+			s.release()
+		}
+		if s.observer != nil {
+			s.observer.End()
+		}
+	})
 	return err
+}
+
+func (s *managedStream) AddBytes(direction metrics.Direction, n int64) {
+	if s != nil && s.observer != nil {
+		s.observer.AddBytes(direction, n)
+	}
 }
 
 func (s *Server) listenerOptions() listener.Options {
