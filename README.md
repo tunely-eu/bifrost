@@ -1,40 +1,54 @@
 # Bifrost
 
-Bifrost exposes selected TCP services from a private network through a public relay, without opening inbound ports on the private side.
+[![CI](https://github.com/tunely-eu/bifrost/actions/workflows/ci.yml/badge.svg)](https://github.com/tunely-eu/bifrost/actions/workflows/ci.yml)
+[![Docker](https://github.com/tunely-eu/bifrost/actions/workflows/docker.yml/badge.svg)](https://github.com/tunely-eu/bifrost/actions/workflows/docker.yml)
+[![Release](https://github.com/tunely-eu/bifrost/actions/workflows/release.yml/badge.svg)](https://github.com/tunely-eu/bifrost/actions/workflows/release.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/tunely-eu/bifrost.svg)](https://pkg.go.dev/github.com/tunely-eu/bifrost)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+Bifrost is a self-hosted TCP reverse tunnel for exposing selected private services through a public relay when your private network is behind NAT, DS-Lite, CGNAT, or a firewall. It is a small NAT traversal building block for homelabs, SOHO networks, and product integrations that need outbound-only connectivity.
 
 Run `bifrost-server` on a reachable VM, run `bifrost-client` next to the private service, and the client opens the tunnel with an outbound TLS connection. Public callers connect to a listener on the relay side; Bifrost forwards those byte streams through the tunnel to the private target.
 
-Typical use case: Home Assistant, Jellyfin, an admin UI, or another internal TCP service runs behind NAT, DS-Lite, CGNAT, or a firewall. A public VM runs Bifrost and your normal reverse proxy. The private network only needs outbound access to the VM.
+Typical use case: Home Assistant, Jellyfin, an admin UI, a development box, or another internal TCP service runs in a homelab or SOHO network that cannot accept inbound traffic. A small public VM runs Bifrost and your normal reverse proxy. The private network only needs outbound access to that VM.
 
-**Status:** Bifrost is early and experimental. The transport, hook contract, Docker entrypoint, and config schema are usable for development, demos, and review, but should be treated as pre-1.0.
+**Status:** Bifrost is early and pre-1.0. The transport, static admission model, Docker entrypoint, metrics, and config schema are usable for development, demos, pilots, and review, but the public protocol and config schema should still be treated as compatibility-sensitive.
 
-## What Bifrost Does
+## Why Bifrost Exists
 
-Bifrost gives you a small, self-hosted data path:
+Homelab and small office networks often have the same set of practical problems:
 
-- `bifrost-server` accepts connector tunnels on a public server.
+- The ISP uses CGNAT, DS-Lite, dynamic addressing, or blocks inbound ports.
+- The router is managed by somebody else, or port forwarding is not desirable.
+- A service needs a normal public HTTPS URL without moving the service to the cloud.
+- The operator wants to keep using Caddy, Nginx, DNS, ACME, access control, and logs they already understand.
+- Only one or two services should be reachable, not the whole private network.
+- The data path should be self-hosted, inspectable, and independent from a hosted tunnel account.
+
+Bifrost is intentionally narrow: it moves byte streams from a relay listener to a private TCP target over an outbound tunnel. It does not try to become a VPN, identity provider, dashboard product, DNS manager, billing system, or reverse proxy.
+
+## What You Get
+
+| Problem | Bifrost answer |
+| --- | --- |
+| No inbound connectivity to the private network | The connector dials out to the public relay over TLS. |
+| Need a public URL for a private service | Put Caddy or Nginx on the relay and proxy to a Bifrost listener. |
+| Avoid exposing an entire LAN | Each connector owns one configured endpoint and target. |
+| Keep control of the data path | The relay, connector, certificates, and reverse proxy are yours. |
+| Reconnects should be predictable | Endpoint ownership is explicit: reject, replace, or allow parallel sessions. |
+| Small networks still need guardrails | Sessions, streams, bandwidth, idle time, headers, and metrics are bounded. |
+| Existing observability should keep working | Optional Prometheus metrics expose sessions, streams, rejects, and bytes. |
+
+## Project Shape
+
+Bifrost is the generic tunnel runtime:
+
+- `bifrost-server` accepts connector tunnels on a reachable host.
 - `bifrost-client` runs near the private service and dials the server outbound.
-- The server creates a listener for the accepted connector, usually a Unix socket consumed by Caddy or Nginx.
-- Every public connection to that listener becomes one multiplexed tunnel stream to the private service.
+- `bifrostctl` validates and prints starter config.
+- The Go library exposes an `AcceptProvider` interface for embedded products and integrations.
 
-Bifrost forwards byte streams. It does not include HTTP routing, DNS, ACME, SNI routing, account management, billing, dashboards, or application authentication. For HTTP services, put a proxy such as Caddy or Nginx on the public VM and point it at the listener Bifrost creates.
-
-## When To Use It
-
-Use Bifrost when you want:
-
-- outbound-only connectivity from a private network
-- a relay you operate yourself
-- TLS on the tunnel transport
-- explicit admission decisions for each connector
-- per-session limits for streams, bandwidth, and idle time
-- listener placement controlled by your server-side policy
-
-Bifrost is not a VPN. It exposes selected stream listeners, not an IP network.
-
-Bifrost is not a hosted tunnel product. It has no hosted control plane, account system, billing logic, or managed edge.
-
-Bifrost is not a reverse proxy. Routing, SNI, certificates, and DNS live outside Bifrost.
+For Caddy-native deployments, see [`caddy-bifrost`](https://github.com/tunely-eu/caddy-bifrost). It embeds Bifrost as a Caddy app, adds a `reverse_proxy` transport, and supports SNI passthrough with listener wrappers.
 
 ## How It Works
 
@@ -59,7 +73,7 @@ flowchart LR
   client --> app
 ```
 
-The connector sends a token during the tunnel handshake. On the server side, Bifrost matches that token against native `clients[]` configuration. If the token is allowed, the server binds the configured listener and applies the configured limits.
+The connector sends a token during the tunnel handshake. On the server side, Bifrost matches that token against native `clients[]` configuration or an embedded `AcceptProvider`. If the connector is allowed, the server binds the configured listener and applies configured limits.
 
 For HTTP services, the common shape is:
 
@@ -67,6 +81,24 @@ For HTTP services, the common shape is:
 2. Caddy proxies to `unix//sockets/home-assistant.sock`.
 3. Bifrost owns that Unix socket and forwards the stream through the tunnel.
 4. The local connector dials `homeassistant:8123` or another private TCP target.
+
+## When To Use It
+
+Use Bifrost when you want:
+
+- outbound-only connectivity from a private network
+- a relay you operate yourself
+- TLS on the tunnel transport
+- explicit admission decisions for each connector
+- per-session limits for streams, bandwidth, and idle time
+- listener placement controlled by server-side policy
+- a small tunnel layer that leaves HTTP routing and certificates to your proxy
+
+Use a VPN instead when you need IP-level access to many hosts or subnets.
+
+Use a hosted tunnel product when you want somebody else to operate the relay, account model, dashboards, DNS integration, and edge network.
+
+Use only a reverse proxy when the private service is already directly reachable from the public proxy.
 
 ## Quick Start
 
@@ -284,7 +316,7 @@ The cloud relay listens on `:8443` by default. Generated Docker config requires 
 
 The full generated Docker config reference and explicit config schema are documented in [Configuration](docs/configuration.md).
 
-## Security And Limitations
+## Security Model
 
 - Client-server tunnel transport is always TLS.
 - ALPN must be `bifrost/1`.
@@ -298,11 +330,20 @@ TLS protects the tunnel between `bifrost-client` and `bifrost-server`. Bifrost d
 
 Application authentication stays with your reverse proxy or target service. Public HTTPS for web services stays with Caddy, Nginx, or another proxy on the public VM. See [Security](docs/security.md).
 
+## Observability
+
+When `admin.listen` is enabled, Bifrost exposes:
+
+- `/readyz`: readiness status
+- `/metrics`: Prometheus-style text metrics
+
+Useful endpoint metrics include active sessions, started streams, ended streams, rejected streams, and stream bytes. Metric labels intentionally use stable endpoint and reason values only. Tokens, remote addresses, application paths, and SNI names are not exported as metric labels.
+
 ## Library Accept Providers
 
 Bifrost exposes an `AcceptProvider` interface for embedded use. The standalone `bifrost-server` builds a static provider from top-level `clients[]` config.
 
-Product-specific modules can provide their own `AcceptProvider` without shell hooks or external helper processes. This is the intended path for Tunely Control Plane integration.
+Product-specific modules can provide their own `AcceptProvider` without shell hooks or external helper processes. This is the integration path used by Caddy-native and future control-plane deployments.
 
 The library API and config schema are documented in [Configuration](docs/configuration.md).
 

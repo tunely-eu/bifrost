@@ -1,3 +1,5 @@
+// Package metrics defines Bifrost observer interfaces and the in-memory metrics
+// implementation used by the standalone admin endpoint.
 package metrics
 
 import (
@@ -8,10 +10,16 @@ import (
 	"sync"
 )
 
+// Direction identifies which side of a proxied stream produced bytes.
 type Direction string
 
 const (
+	// DirectionIngressToEndpoint counts bytes from the server-side ingress
+	// connection toward the private endpoint.
 	DirectionIngressToEndpoint Direction = "ingress_to_endpoint"
+
+	// DirectionEndpointToIngress counts bytes from the private endpoint back to
+	// the server-side ingress connection.
 	DirectionEndpointToIngress Direction = "endpoint_to_ingress"
 )
 
@@ -31,6 +39,10 @@ const (
 	RejectStreamOpen      = "stream_open"
 )
 
+// Observer receives server and stream lifecycle events.
+//
+// Implementations should keep labels low-cardinality and avoid recording
+// secrets such as tokens, remote addresses, or application paths.
 type Observer interface {
 	Ready(bool)
 	ConnectionAttempted()
@@ -41,11 +53,13 @@ type Observer interface {
 	StreamRejected(endpointKey string, reason string)
 }
 
+// StreamObserver receives events for one proxied stream.
 type StreamObserver interface {
 	AddBytes(direction Direction, n int64)
 	End()
 }
 
+// Noop is an Observer implementation that ignores all events.
 type Noop struct{}
 
 func (Noop) Ready(bool)                          {}
@@ -56,15 +70,18 @@ func (Noop) SessionEnded(string)                 {}
 func (Noop) StreamStarted(string) StreamObserver { return NoopStream{} }
 func (Noop) StreamRejected(string, string)       {}
 
+// NoopStream is a StreamObserver implementation that ignores all events.
 type NoopStream struct{}
 
 func (NoopStream) AddBytes(Direction, int64) {}
 func (NoopStream) End()                      {}
 
+// Multi fans observer events out to several observers.
 type Multi struct {
 	observers []Observer
 }
 
+// NewMulti returns an Observer that calls every non-nil observer in order.
 func NewMulti(observers ...Observer) Observer {
 	filtered := make([]Observer, 0, len(observers))
 	for _, observer := range observers {
@@ -78,36 +95,42 @@ func NewMulti(observers ...Observer) Observer {
 	return Multi{observers: filtered}
 }
 
+// Ready records whether the server is ready to accept work.
 func (m Multi) Ready(ready bool) {
 	for _, observer := range m.observers {
 		observer.Ready(ready)
 	}
 }
 
+// ConnectionAttempted records a connector connection attempt.
 func (m Multi) ConnectionAttempted() {
 	for _, observer := range m.observers {
 		observer.ConnectionAttempted()
 	}
 }
 
+// ConnectionRejected records a rejected connector or stream setup reason.
 func (m Multi) ConnectionRejected(reason string) {
 	for _, observer := range m.observers {
 		observer.ConnectionRejected(reason)
 	}
 }
 
+// SessionStarted records the start of an accepted connector session.
 func (m Multi) SessionStarted(endpointKey string) {
 	for _, observer := range m.observers {
 		observer.SessionStarted(endpointKey)
 	}
 }
 
+// SessionEnded records the end of an accepted connector session.
 func (m Multi) SessionEnded(endpointKey string) {
 	for _, observer := range m.observers {
 		observer.SessionEnded(endpointKey)
 	}
 }
 
+// StreamStarted records a proxied stream and returns its observer.
 func (m Multi) StreamStarted(endpointKey string) StreamObserver {
 	streams := make([]StreamObserver, 0, len(m.observers))
 	for _, observer := range m.observers {
@@ -116,12 +139,14 @@ func (m Multi) StreamStarted(endpointKey string) StreamObserver {
 	return MultiStream{streams: streams}
 }
 
+// StreamRejected records a stream rejection for an endpoint.
 func (m Multi) StreamRejected(endpointKey string, reason string) {
 	for _, observer := range m.observers {
 		observer.StreamRejected(endpointKey, reason)
 	}
 }
 
+// Snapshot merges snapshots from child observers that implement Snapshotter.
 func (m Multi) Snapshot() []Sample {
 	var out []Sample
 	for _, observer := range m.observers {
@@ -139,10 +164,12 @@ func (m Multi) Snapshot() []Sample {
 	return out
 }
 
+// MultiStream fans stream events out to several stream observers.
 type MultiStream struct {
 	streams []StreamObserver
 }
 
+// AddBytes records bytes for all child stream observers.
 func (m MultiStream) AddBytes(direction Direction, n int64) {
 	for _, stream := range m.streams {
 		if stream != nil {
@@ -151,6 +178,7 @@ func (m MultiStream) AddBytes(direction Direction, n int64) {
 	}
 }
 
+// End records stream completion for all child stream observers.
 func (m MultiStream) End() {
 	for _, stream := range m.streams {
 		if stream != nil {
@@ -159,16 +187,25 @@ func (m MultiStream) End() {
 	}
 }
 
+// Sample is one Prometheus-style metric sample without the "bifrost_" prefix.
 type Sample struct {
-	Name   string
+	// Name is the metric name suffix.
+	Name string
+
+	// Labels are low-cardinality metric labels.
 	Labels map[string]string
-	Value  float64
+
+	// Value is the sample value.
+	Value float64
 }
 
+// Snapshotter exposes point-in-time metric samples.
 type Snapshotter interface {
 	Snapshot() []Sample
 }
 
+// Memory is an in-memory Observer and Snapshotter used by the standalone
+// admin metrics endpoint.
 type Memory struct {
 	mu     sync.Mutex
 	values map[string]memorySample
@@ -180,10 +217,12 @@ type memorySample struct {
 	value  float64
 }
 
+// NewMemory returns an empty in-memory observer.
 func NewMemory() *Memory {
 	return &Memory{values: make(map[string]memorySample)}
 }
 
+// Ready records whether the runtime is ready.
 func (m *Memory) Ready(ready bool) {
 	if ready {
 		m.set("ready", nil, 1)
@@ -192,14 +231,17 @@ func (m *Memory) Ready(ready bool) {
 	m.set("ready", nil, 0)
 }
 
+// ConnectionAttempted increments the connector attempt counter.
 func (m *Memory) ConnectionAttempted() {
 	m.add("connection_attempts_total", nil, 1)
 }
 
+// ConnectionRejected increments the connector rejection counter for reason.
 func (m *Memory) ConnectionRejected(reason string) {
 	m.add("connection_rejections_total", map[string]string{"reason": safeLabelValue(reason)}, 1)
 }
 
+// SessionStarted records an active session for endpointKey.
 func (m *Memory) SessionStarted(endpointKey string) {
 	m.add("active_sessions", nil, 1)
 	if endpointKey != "" {
@@ -207,6 +249,7 @@ func (m *Memory) SessionStarted(endpointKey string) {
 	}
 }
 
+// SessionEnded removes an active session for endpointKey.
 func (m *Memory) SessionEnded(endpointKey string) {
 	m.add("active_sessions", nil, -1)
 	if endpointKey != "" {
@@ -214,6 +257,7 @@ func (m *Memory) SessionEnded(endpointKey string) {
 	}
 }
 
+// StreamStarted records stream start metrics and returns a stream observer.
 func (m *Memory) StreamStarted(endpointKey string) StreamObserver {
 	m.add("streams_started_total", nil, 1)
 	if endpointKey != "" {
@@ -222,6 +266,7 @@ func (m *Memory) StreamStarted(endpointKey string) StreamObserver {
 	return &memoryStream{memory: m, endpointKey: endpointKey}
 }
 
+// StreamRejected records a rejected stream for endpointKey.
 func (m *Memory) StreamRejected(endpointKey string, reason string) {
 	m.add("stream_rejections_total", map[string]string{"reason": safeLabelValue(reason)}, 1)
 	if endpointKey != "" {
@@ -232,6 +277,7 @@ func (m *Memory) StreamRejected(endpointKey string, reason string) {
 	}
 }
 
+// Snapshot returns a sorted copy of current metric samples.
 func (m *Memory) Snapshot() []Sample {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -305,6 +351,8 @@ func (s *memoryStream) End() {
 	})
 }
 
+// Handler renders samples from observer in Prometheus text exposition format.
+// Non-snapshot observers render an empty response with the metrics content type.
 func Handler(observer Observer) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")

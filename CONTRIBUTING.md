@@ -46,7 +46,7 @@ make docker-build
 - Keep changes scoped to one behavior or maintenance task.
 - Add or update tests when behavior changes.
 - Update `README.md` or `docs/` when user-facing behavior, configuration, protocol, or security expectations change.
-- Call out compatibility impact for config schema, accept hook JSON, protocol, listener behavior, and Docker entrypoint changes.
+- Call out compatibility impact for config schema, admission decisions, protocol, listener behavior, and Docker entrypoint changes.
 - Do not commit local binaries, demo certificates, logs, credentials, or machine-specific editor files.
 
 ## Security

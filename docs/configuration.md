@@ -7,7 +7,7 @@ There are two configuration paths:
 - Docker environment variables, translated into generated config files by the image entrypoint.
 - Explicit config files passed to `bifrost-server` or `bifrost-client` with `--config`.
 
-Use environment variables for the default Docker workflow. Use explicit config files when you need fields that are intentionally not exposed as environment variables, such as a custom accept hook, listener safety flags, server guardrails, runtime timeouts, or checked-in deployment configuration.
+Use environment variables for the default Docker workflow. Use explicit config files when you need fields that are intentionally not exposed as environment variables, such as listener safety flags, server guardrails, runtime timeouts, or checked-in deployment configuration.
 
 ## Docker Environment Configuration
 
@@ -172,13 +172,13 @@ The server config has a top-level `clients` array. Each item describes one accep
 | `clients[].limits.max_streams` | int | Maximum concurrent streams for the session. Checked against server guardrails. |
 | `clients[].limits.max_bandwidth_bps` | int | Session bandwidth limit in bytes per second. Checked against server guardrails. |
 | `clients[].limits.stream_idle_timeout_seconds` | int | Stream idle timeout in seconds. Checked against server guardrails. |
-| `clients[].labels` | map of string to string | Optional metadata for logs or external hook implementations. |
+| `clients[].labels` | map of string to string | Optional metadata for logs or embedded provider implementations. |
 
 Missing client limits use plan defaults before guardrail checks: `max_streams` defaults to `100`, `max_bandwidth_bps` defaults to `25000000`, and `stream_idle_timeout_seconds` defaults to `300`.
 
 ## Library Accept Providers
 
-Bifrost exposes an `AcceptProvider` interface for embedded use. The CLI builds a static provider from `clients[]`. Product-specific modules, such as a future Tunely Caddy module, can provide their own implementation without shell hooks or process execution.
+Bifrost exposes an `AcceptProvider` interface for embedded use. The standalone server builds a static provider from `clients[]`. Product-specific modules, such as Caddy-native or control-plane integrations, can provide their own implementation without shell hooks or process execution.
 
 ## Admin Endpoints
 

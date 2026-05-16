@@ -1,3 +1,5 @@
+// Package acceptor contains Bifrost connector admission interfaces and the
+// static token-backed provider used by standalone deployments.
 package acceptor
 
 import (
@@ -9,52 +11,107 @@ import (
 )
 
 const (
+	// TokenHeader is the normalized connector hello header containing the shared
+	// token used by StaticProvider.
 	TokenHeader = "x-bifrost-token"
 
-	PolicyRejectIfExists  = "reject_if_exists"
+	// PolicyRejectIfExists rejects a new session when an endpoint key is already
+	// active.
+	PolicyRejectIfExists = "reject_if_exists"
+	// PolicyReplaceExisting closes the existing session and lets the new session
+	// take ownership of the endpoint key.
 	PolicyReplaceExisting = "replace_existing"
-	PolicyAllowParallel   = "allow_parallel"
+	// PolicyAllowParallel allows several active sessions for the same endpoint
+	// key, bounded by ConnectionPolicy.MaxParallel.
+	PolicyAllowParallel = "allow_parallel"
 )
 
+// Provider authorizes connector sessions and returns their endpoint ownership,
+// label, and limit decisions.
 type Provider interface {
 	Accept(context.Context, Request) (Decision, error)
 }
 
+// Request describes a connector session after transport-level validation.
 type Request struct {
-	RemoteAddr      string            `json:"remote_addr"`
-	Headers         map[string]string `json:"headers"`
-	ProtocolVersion string            `json:"protocol_version"`
-	Transport       string            `json:"transport"`
-	ALPN            string            `json:"alpn"`
-	Timestamp       string            `json:"timestamp"`
+	// RemoteAddr is the connector's remote network address as seen by the server.
+	RemoteAddr string `json:"remote_addr"`
+
+	// Headers contains normalized hello headers. Header values are opaque to the
+	// tunnel runtime.
+	Headers map[string]string `json:"headers"`
+
+	// ProtocolVersion is the Bifrost hello protocol version.
+	ProtocolVersion string `json:"protocol_version"`
+
+	// Transport describes the negotiated transport stack.
+	Transport string `json:"transport"`
+
+	// ALPN is the TLS application protocol negotiated for this session.
+	ALPN string `json:"alpn"`
+
+	// Timestamp is the server-side admission timestamp in RFC3339 format.
+	Timestamp string `json:"timestamp"`
 }
 
+// ConnectionPolicy controls how competing sessions for an endpoint key are
+// handled.
 type ConnectionPolicy struct {
-	Mode        string `json:"mode,omitempty" yaml:"mode,omitempty"`
-	MaxParallel int    `json:"max_parallel,omitempty" yaml:"max_parallel,omitempty"`
+	// Mode is one of reject_if_exists, replace_existing, or allow_parallel.
+	Mode string `json:"mode,omitempty" yaml:"mode,omitempty"`
+
+	// MaxParallel bounds active sessions when Mode is allow_parallel.
+	MaxParallel int `json:"max_parallel,omitempty" yaml:"max_parallel,omitempty"`
 }
 
+// Decision is the admission result returned by a Provider.
 type Decision struct {
-	Allow            bool              `json:"allow"`
-	Reason           string            `json:"reason,omitempty"`
-	EndpointKey      string            `json:"endpoint_key,omitempty"`
-	ConnectionPolicy ConnectionPolicy  `json:"connection_policy,omitempty"`
-	Limits           limits.PlanLimits `json:"limits,omitempty"`
-	Labels           map[string]string `json:"labels,omitempty"`
+	// Allow decides whether the connector session may proceed.
+	Allow bool `json:"allow"`
+
+	// Reason is a diagnostic string for denied sessions. It should not contain
+	// secrets.
+	Reason string `json:"reason,omitempty"`
+
+	// EndpointKey is the stable endpoint identity used for ownership and stream
+	// routing. It is required when Allow is true.
+	EndpointKey string `json:"endpoint_key,omitempty"`
+
+	// ConnectionPolicy defines reconnect and competing-session behavior.
+	ConnectionPolicy ConnectionPolicy `json:"connection_policy,omitempty"`
+
+	// Limits defines per-session stream, bandwidth, and idle-time limits.
+	Limits limits.PlanLimits `json:"limits,omitempty"`
+
+	// Labels carries optional provider metadata for logs and embedding products.
+	Labels map[string]string `json:"labels,omitempty"`
 }
 
+// StaticClient configures one token-backed connector for StaticProvider.
 type StaticClient struct {
-	Token            string            `json:"token" yaml:"token"`
-	EndpointKey      string            `json:"endpoint_key" yaml:"endpoint_key"`
-	ConnectionPolicy ConnectionPolicy  `json:"connection_policy,omitempty" yaml:"connection_policy,omitempty"`
-	Limits           limits.PlanLimits `json:"limits,omitempty" yaml:"limits,omitempty"`
-	Labels           map[string]string `json:"labels,omitempty" yaml:"labels,omitempty"`
+	// Token is the shared connector secret matched against TokenHeader.
+	Token string `json:"token" yaml:"token"`
+
+	// EndpointKey is the stable identity assigned to sessions using Token.
+	EndpointKey string `json:"endpoint_key" yaml:"endpoint_key"`
+
+	// ConnectionPolicy controls reconnect behavior for EndpointKey.
+	ConnectionPolicy ConnectionPolicy `json:"connection_policy,omitempty" yaml:"connection_policy,omitempty"`
+
+	// Limits defines per-session stream, bandwidth, and idle-time limits.
+	Limits limits.PlanLimits `json:"limits,omitempty" yaml:"limits,omitempty"`
+
+	// Labels carries optional metadata for logs and embedding products.
+	Labels map[string]string `json:"labels,omitempty" yaml:"labels,omitempty"`
 }
 
+// StaticProvider authorizes connectors by matching TokenHeader against a static
+// in-memory client table.
 type StaticProvider struct {
 	clientsByToken map[string]StaticClient
 }
 
+// NewStaticProvider validates clients and returns a static token-based Provider.
 func NewStaticProvider(clients []StaticClient) (*StaticProvider, error) {
 	provider := &StaticProvider{clientsByToken: make(map[string]StaticClient, len(clients))}
 	for index, client := range clients {
@@ -81,6 +138,7 @@ func NewStaticProvider(clients []StaticClient) (*StaticProvider, error) {
 	return provider, nil
 }
 
+// Accept returns an allow decision when req contains a known TokenHeader value.
 func (p *StaticProvider) Accept(_ context.Context, req Request) (Decision, error) {
 	if p == nil {
 		return Decision{Allow: false, Reason: "accept provider is not configured"}, nil
@@ -102,6 +160,7 @@ func (p *StaticProvider) Accept(_ context.Context, req Request) (Decision, error
 	}, nil
 }
 
+// Normalized fills implicit defaults for a connection policy.
 func (p ConnectionPolicy) Normalized() ConnectionPolicy {
 	if strings.TrimSpace(p.Mode) == "" {
 		p.Mode = PolicyRejectIfExists
@@ -112,6 +171,8 @@ func (p ConnectionPolicy) Normalized() ConnectionPolicy {
 	return p
 }
 
+// Validate checks whether the connection policy uses a supported mode and
+// required values for that mode.
 func (p ConnectionPolicy) Validate() error {
 	switch p.Normalized().Mode {
 	case PolicyRejectIfExists, PolicyReplaceExisting:
@@ -126,6 +187,8 @@ func (p ConnectionPolicy) Validate() error {
 	}
 }
 
+// ValidateDecision applies defaults and server guardrails to an allowed
+// provider decision.
 func ValidateDecision(decision Decision, guardrails limits.Guardrails) (Decision, error) {
 	if !decision.Allow {
 		return decision, nil

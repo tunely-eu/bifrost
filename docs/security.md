@@ -2,6 +2,8 @@
 
 Bifrost is designed to keep the tunnel core small and fail closed around the security-sensitive boundaries: transport setup, connector admission, listener creation, and resource control.
 
+The security model is deliberately layered. Bifrost protects and limits the tunnel between the private connector and the public relay; the reverse proxy and target application remain responsible for browser-facing TLS, user authentication, authorization, and application-level policy.
+
 ## Built-In Protections
 
 - TLS is required for every client-server tunnel.
@@ -18,13 +20,17 @@ The client-server tunnel is protected by TLS. The server-side listener and the c
 
 - If the server-side listener should speak HTTPS, terminate TLS in a proxy or service in front of that listener.
 - If the client-side local target requires authentication or encryption, provide it at the target service layer.
-- Treat connector hello headers as untrusted. Validate headers and remote metadata before mapping them to endpoints, listeners, or limits.
+- Treat connector hello headers as untrusted. Validate headers and remote metadata inside any custom `AcceptProvider` before mapping them to endpoints, listeners, or limits.
+
+The connector token admits a tunnel session. It is not an end-user login system for the exposed service.
 
 ## Listener Safety
 
 Unix socket listeners should use deployment-owned runtime directories and restrictive file modes.
 
 TCP listeners should bind to loopback unless surrounding network controls are intentional.
+
+For Docker deployments, mount only the socket directory needed by the public reverse proxy. Keep relay private keys on the relay host and copy only public CA material to the connector side.
 
 ## Resource Control
 
@@ -51,3 +57,14 @@ Bifrost does not provide application-layer authentication for exposed services.
 Bifrost does not manage certificates, DNS records, SNI routing, accounts, tenants, or billing.
 
 Those concerns belong to surrounding infrastructure, a product-specific `AcceptProvider`, a reverse proxy, or the target application.
+
+## Operational Checklist
+
+- Use long random connector tokens.
+- Keep tokens and relay private keys out of git.
+- Keep `server.key` only on the relay host.
+- Use a public CA or mount the correct private CA on the connector.
+- Bind TCP listeners to loopback unless public exposure is intentional.
+- Prefer Unix sockets between Bifrost and a public reverse proxy when both run on the relay host.
+- Set stream, bandwidth, and idle limits before exposing high-traffic services.
+- Treat `insecure_skip_verify` as development-only.

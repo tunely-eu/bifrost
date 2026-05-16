@@ -14,7 +14,7 @@ TLS is mandatory. The client must offer ALPN `bifrost/1`; the server rejects con
 2. TLS handshake completes.
 3. ALPN must negotiate `bifrost/1`.
 4. Client sends one newline-terminated JSON hello.
-5. Server validates the hello and runs the accept hook.
+5. Server validates the hello and asks the configured admission provider for a decision.
 6. Server replies with an accept or reject JSON response.
 7. On accept, yamux starts on the same TLS connection.
 
@@ -33,7 +33,7 @@ The client sends one newline-terminated JSON object:
 
 `protocol_version` is currently `1`.
 
-Header names are syntactically validated and normalized to lower-case before they are passed to the accept hook. Header values are opaque to Bifrost; the tunnel runtime does not interpret them beyond size and count limits.
+Header names are syntactically validated and normalized to lower-case before they are passed to the admission provider. Header values are opaque to Bifrost; the tunnel runtime does not interpret them beyond size and count limits.
 
 ## Server Response
 
@@ -55,7 +55,7 @@ Rejected connections do not start yamux. The reason is intended for diagnostics 
 
 After accept, each server-side listener connection opens one yamux stream to the client. The client dials its configured local TCP target for every stream and copies bytes in both directions.
 
-Stream concurrency, bandwidth, and idle lifetime come from the accept decision, then are checked against server guardrails before the listener is opened.
+Stream concurrency, bandwidth, and idle lifetime come from the admission decision, then are checked against server guardrails before the listener is opened.
 
 ## Keepalive
 

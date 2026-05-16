@@ -1,3 +1,5 @@
+// Package limits defines the per-session limits, server guardrails, and small
+// runtime helpers used by the Bifrost tunnel data path.
 package limits
 
 import (
@@ -8,12 +10,21 @@ import (
 	"time"
 )
 
+// PlanLimits defines the per-session limits granted by an admission decision.
 type PlanLimits struct {
-	MaxStreams               int   `json:"max_streams,omitempty" yaml:"max_streams,omitempty"`
-	MaxBandwidthBPS          int64 `json:"max_bandwidth_bps,omitempty" yaml:"max_bandwidth_bps,omitempty"`
-	StreamIdleTimeoutSeconds int   `json:"stream_idle_timeout_seconds,omitempty" yaml:"stream_idle_timeout_seconds,omitempty"`
+	// MaxStreams is the maximum number of concurrent streams in one connector
+	// session.
+	MaxStreams int `json:"max_streams,omitempty" yaml:"max_streams,omitempty"`
+
+	// MaxBandwidthBPS limits aggregate session bandwidth in bytes per second.
+	MaxBandwidthBPS int64 `json:"max_bandwidth_bps,omitempty" yaml:"max_bandwidth_bps,omitempty"`
+
+	// StreamIdleTimeoutSeconds closes a stream after this many idle seconds.
+	StreamIdleTimeoutSeconds int `json:"stream_idle_timeout_seconds,omitempty" yaml:"stream_idle_timeout_seconds,omitempty"`
 }
 
+// DefaultPlanLimits returns the default per-session limits used when a decision
+// omits explicit values.
 func DefaultPlanLimits() PlanLimits {
 	return PlanLimits{
 		MaxStreams:               100,
@@ -22,6 +33,7 @@ func DefaultPlanLimits() PlanLimits {
 	}
 }
 
+// WithDefaults fills zero-valued fields from defaults and returns the result.
 func (v PlanLimits) WithDefaults(defaults PlanLimits) PlanLimits {
 	if defaults == (PlanLimits{}) {
 		defaults = DefaultPlanLimits()
@@ -38,6 +50,8 @@ func (v PlanLimits) WithDefaults(defaults PlanLimits) PlanLimits {
 	return v
 }
 
+// Validate checks that all limit fields are positive after defaults have been
+// applied.
 func (v PlanLimits) Validate() error {
 	if v.MaxStreams <= 0 {
 		return fmt.Errorf("limits.max_streams must be positive")
@@ -51,6 +65,7 @@ func (v PlanLimits) Validate() error {
 	return nil
 }
 
+// StreamIdleTimeout returns StreamIdleTimeoutSeconds as a time.Duration.
 func (v PlanLimits) StreamIdleTimeout() time.Duration {
 	if v.StreamIdleTimeoutSeconds <= 0 {
 		return 0
@@ -58,6 +73,8 @@ func (v PlanLimits) StreamIdleTimeout() time.Duration {
 	return time.Duration(v.StreamIdleTimeoutSeconds) * time.Second
 }
 
+// UnmarshalJSON rejects unknown limit fields so misspelled configuration does
+// not silently fall back to defaults.
 func (v *PlanLimits) UnmarshalJSON(data []byte) error {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {
@@ -79,23 +96,50 @@ func (v *PlanLimits) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// Guardrails defines server-wide ceilings for accepted session limits and hello
+// metadata.
 type Guardrails struct {
-	MaxSessions               int   `json:"max_sessions,omitempty" yaml:"max_sessions,omitempty"`
-	MaxStreamsPerSession      int   `json:"max_streams_per_session,omitempty" yaml:"max_streams_per_session,omitempty"`
+	// MaxSessions limits the number of active connector sessions on the server.
+	MaxSessions int `json:"max_sessions,omitempty" yaml:"max_sessions,omitempty"`
+
+	// MaxStreamsPerSession is the highest MaxStreams value a decision may grant.
+	MaxStreamsPerSession int `json:"max_streams_per_session,omitempty" yaml:"max_streams_per_session,omitempty"`
+
+	// MaxBandwidthBPSPerSession is the highest MaxBandwidthBPS value a decision
+	// may grant.
 	MaxBandwidthBPSPerSession int64 `json:"max_bandwidth_bps_per_session,omitempty" yaml:"max_bandwidth_bps_per_session,omitempty"`
-	MinStreamIdleTimeout      time.Duration
-	MaxStreamIdleTimeout      time.Duration
-	MaxHeaders                int `json:"max_headers,omitempty" yaml:"max_headers,omitempty"`
-	MaxHeaderBytes            int `json:"max_header_bytes,omitempty" yaml:"max_header_bytes,omitempty"`
+
+	// MinStreamIdleTimeout is the shortest stream idle timeout a decision may
+	// grant.
+	MinStreamIdleTimeout time.Duration
+
+	// MaxStreamIdleTimeout is the longest stream idle timeout a decision may
+	// grant.
+	MaxStreamIdleTimeout time.Duration
+
+	// MaxHeaders limits the number of hello headers accepted from a connector.
+	MaxHeaders int `json:"max_headers,omitempty" yaml:"max_headers,omitempty"`
+
+	// MaxHeaderBytes limits the combined hello header name and value bytes.
+	MaxHeaderBytes int `json:"max_header_bytes,omitempty" yaml:"max_header_bytes,omitempty"`
 }
 
+// Runtime contains low-level transport tuning values.
 type Runtime struct {
-	HandshakeTimeout        time.Duration
-	StreamCopyBufferBytes   int
+	// HandshakeTimeout bounds TLS and protocol hello negotiation.
+	HandshakeTimeout time.Duration
+
+	// StreamCopyBufferBytes sets the copy buffer size used for stream proxying.
+	StreamCopyBufferBytes int
+
+	// TunnelKeepAliveInterval controls yamux keepalive frequency.
 	TunnelKeepAliveInterval time.Duration
-	TunnelKeepAliveTimeout  time.Duration
+
+	// TunnelKeepAliveTimeout closes a tunnel when keepalive responses stop.
+	TunnelKeepAliveTimeout time.Duration
 }
 
+// EnforceGuardrails rejects plan values outside configured server guardrails.
 func EnforceGuardrails(plan PlanLimits, guardrails Guardrails) error {
 	if err := plan.Validate(); err != nil {
 		return err
@@ -116,6 +160,7 @@ func EnforceGuardrails(plan PlanLimits, guardrails Guardrails) error {
 	return nil
 }
 
+// BufferSize normalizes a requested stream copy buffer size.
 func BufferSize(bytes int) int {
 	if bytes <= 0 || bytes > 32*1024 {
 		return 32 * 1024
@@ -123,6 +168,7 @@ func BufferSize(bytes int) int {
 	return bytes
 }
 
+// RateLimiter is a simple byte-oriented token bucket.
 type RateLimiter struct {
 	rate     int64
 	capacity float64
@@ -132,6 +178,8 @@ type RateLimiter struct {
 	last   time.Time
 }
 
+// NewRateLimiter returns a token bucket that allows bytesPerSecond aggregate
+// throughput. It returns nil when bytesPerSecond is not positive.
 func NewRateLimiter(bytesPerSecond int64) *RateLimiter {
 	if bytesPerSecond <= 0 {
 		return nil
@@ -146,6 +194,7 @@ func NewRateLimiter(bytesPerSecond int64) *RateLimiter {
 	}
 }
 
+// Wait blocks until bytes may be consumed or ctx is canceled.
 func (l *RateLimiter) Wait(ctx context.Context, bytes int) error {
 	if l == nil || bytes <= 0 {
 		return nil
