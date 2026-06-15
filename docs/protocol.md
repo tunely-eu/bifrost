@@ -69,6 +69,11 @@ runtime:
 
 The server sends periodic yamux pings. If the client does not respond within `tunnel_keepalive_timeout`, yamux closes the session and Bifrost removes the session and its server-side listener.
 
+The relay records the round-trip time from these session keepalive ping
+responses as passive endpoint latency state. This state is tunnel control
+metadata only; it is not application latency and does not inspect proxied
+payload bytes.
+
 ## Compatibility Notes
 
 The protocol is pre-1.0. Changes to ALPN, hello fields, response fields, or stream semantics should be treated as compatibility-sensitive and documented in release notes.

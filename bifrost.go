@@ -26,6 +26,7 @@ import (
 	"github.com/tunely-eu/bifrost/internal/acceptor"
 	"github.com/tunely-eu/bifrost/internal/client"
 	"github.com/tunely-eu/bifrost/internal/config"
+	"github.com/tunely-eu/bifrost/internal/latency"
 	"github.com/tunely-eu/bifrost/internal/limits"
 	"github.com/tunely-eu/bifrost/internal/listener"
 	"github.com/tunely-eu/bifrost/internal/metrics"
@@ -83,6 +84,25 @@ type Observer = metrics.Observer
 // StreamObserver receives byte-count and end events for one proxied stream.
 type StreamObserver = metrics.StreamObserver
 
+// PassiveLatencyObserver receives endpoint-keyed passive session latency
+// observations derived from Bifrost session/mux control traffic.
+type PassiveLatencyObserver = latency.Observer
+
+// PassiveLatencySnapshotter exposes endpoint-keyed passive latency state.
+type PassiveLatencySnapshotter = latency.Snapshotter
+
+// PassiveLatencyObservation is the latest passive latency state for one
+// endpoint. It carries only endpoint key, latency milliseconds, observation
+// time, and controlled state.
+type PassiveLatencyObservation = latency.Observation
+
+// PassiveLatencyStore records latest passive latency observations by endpoint.
+type PassiveLatencyStore = latency.Store
+
+// PassiveLatencyState is the controlled state for a passive latency
+// observation.
+type PassiveLatencyState = latency.State
+
 // Direction describes the side of a proxied stream that produced bytes.
 type Direction = metrics.Direction
 
@@ -92,6 +112,17 @@ type NoopObserver = metrics.Noop
 // NoopStreamObserver is a StreamObserver implementation that ignores every
 // event.
 type NoopStreamObserver = metrics.NoopStream
+
+const (
+	// PassiveLatencyOK means a fresh passive latency observation is available.
+	PassiveLatencyOK PassiveLatencyState = latency.StateOK
+	// PassiveLatencyUnknown means no passive observation is available for the
+	// endpoint.
+	PassiveLatencyUnknown PassiveLatencyState = latency.StateUnknown
+	// PassiveLatencyStale means the latest passive observation is older than the
+	// store's freshness window.
+	PassiveLatencyStale PassiveLatencyState = latency.StateStale
+)
 
 // Listener describes a server-side listener specification. Use ListenerSpec to
 // build values without depending on the internal listener package path.
@@ -110,6 +141,12 @@ const (
 // observer in order. It returns a no-op observer when no observers are supplied.
 func NewMultiObserver(observers ...Observer) Observer {
 	return metrics.NewMulti(observers...)
+}
+
+// NewPassiveLatencyStore returns an endpoint-keyed passive latency store. A
+// non-positive staleAfter keeps observations in ok state until replaced.
+func NewPassiveLatencyStore(staleAfter time.Duration) *PassiveLatencyStore {
+	return latency.NewStore(staleAfter)
 }
 
 // ServerConfig configures a Bifrost relay runtime.
@@ -211,6 +248,11 @@ type ServerOptions struct {
 	// Observer receives lifecycle and byte-count events. It may be nil.
 	Observer Observer
 
+	// PassiveLatencyObserver receives endpoint-keyed passive latency
+	// observations. It may be nil; the Server still keeps its own latest
+	// observation snapshot.
+	PassiveLatencyObserver PassiveLatencyObserver
+
 	// Listener supplies an already-created connector listener. When set, Listen in
 	// ServerConfig is informational and the server does not create a listener.
 	Listener net.Listener
@@ -239,13 +281,14 @@ func NewStaticAcceptProvider(clients []StaticClient) (AcceptProvider, error) {
 // to be started with Server.Run.
 func NewServer(cfg ServerConfig, opts ServerOptions) (*Server, error) {
 	inner, err := server.New(toInternalServerConfig(cfg), server.Options{
-		Logger:         opts.Logger,
-		Observer:       opts.Observer,
-		AcceptProvider: opts.AcceptProvider,
-		TLSConfig:      cfg.TLSConfig,
-		Listener:       opts.Listener,
-		Ready:          opts.Ready,
-		AdminReady:     opts.AdminReady,
+		Logger:          opts.Logger,
+		Observer:        opts.Observer,
+		LatencyObserver: opts.PassiveLatencyObserver,
+		AcceptProvider:  opts.AcceptProvider,
+		TLSConfig:       cfg.TLSConfig,
+		Listener:        opts.Listener,
+		Ready:           opts.Ready,
+		AdminReady:      opts.AdminReady,
 	})
 	if err != nil {
 		return nil, err
@@ -279,6 +322,18 @@ func (s *Server) OpenStream(ctx context.Context, endpointKey string) (net.Conn, 
 // bytes in both directions until either side closes or ctx is canceled.
 func (s *Server) ProxyStream(ctx context.Context, endpointKey string, ingressConn net.Conn) error {
 	return s.inner.ProxyStream(ctx, endpointKey, ingressConn)
+}
+
+// PassiveLatencyObservation returns the latest passive latency state for
+// endpointKey. Unknown is returned when no observation exists.
+func (s *Server) PassiveLatencyObservation(endpointKey string, now time.Time) PassiveLatencyObservation {
+	return s.inner.LatencyObservation(endpointKey, now)
+}
+
+// PassiveLatencySnapshot returns latest passive latency state for every
+// observed endpoint.
+func (s *Server) PassiveLatencySnapshot(now time.Time) []PassiveLatencyObservation {
+	return s.inner.LatencySnapshot(now)
 }
 
 // ClientConfig configures a Bifrost connector runtime.

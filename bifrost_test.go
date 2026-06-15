@@ -173,6 +173,75 @@ func TestLibraryServerClientOpenStreamWithExternalTLSConfig(t *testing.T) {
 	expectCleanShutdown(t, clientErr, "client")
 }
 
+func TestLibraryServerPassiveLatencyObservation(t *testing.T) {
+	dir := t.TempDir()
+	certFile, keyFile, caFile := writeSelfSignedCert(t, dir)
+
+	serverReady := make(chan net.Addr, 1)
+	server, err := NewServer(ServerConfig{
+		Listen:      "127.0.0.1:0",
+		TLSCertFile: certFile,
+		TLSKeyFile:  keyFile,
+		Clients: []StaticClient{
+			{
+				Token:       "secret",
+				EndpointKey: "home",
+				ConnectionPolicy: ConnectionPolicy{
+					Mode: PolicyReplaceExisting,
+				},
+				Limits: PlanLimits{
+					MaxStreams:               10,
+					MaxBandwidthBPS:          100_000_000,
+					StreamIdleTimeoutSeconds: 30,
+				},
+			},
+		},
+		Runtime: Runtime{
+			TunnelKeepAliveInterval: 10 * time.Millisecond,
+			TunnelKeepAliveTimeout:  100 * time.Millisecond,
+		},
+	}, ServerOptions{Ready: func(addr net.Addr) { serverReady <- addr }})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	if unknown := server.PassiveLatencyObservation("missing", time.Now()); unknown.State != PassiveLatencyUnknown {
+		t.Fatalf("missing endpoint state = %q", unknown.State)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	serverErr := make(chan error, 1)
+	go func() {
+		serverErr <- server.Run(ctx)
+	}()
+	serverAddr := waitAddr(t, serverReady, "server")
+
+	clientErr := make(chan error, 1)
+	go func() {
+		clientErr <- RunClient(ctx, ClientConfig{
+			ServerURL:     serverAddr.String(),
+			Headers:       map[string]string{TokenHeader: "secret"},
+			TLSCAFile:     caFile,
+			TLSServerName: "localhost",
+		}, ClientOptions{
+			StreamHandler: func(context.Context, net.Conn) {},
+		})
+	}()
+
+	latency := waitPassiveLatency(t, server, "home")
+	if latency.LatencyMS == nil || *latency.LatencyMS <= 0 {
+		t.Fatalf("latency_ms = %#v", latency.LatencyMS)
+	}
+	if latency.ObservedAt == nil || latency.ObservedAt.IsZero() {
+		t.Fatalf("observed_at = %#v", latency.ObservedAt)
+	}
+
+	cancel()
+	expectCleanShutdown(t, serverErr, "server")
+	expectCleanShutdown(t, clientErr, "client")
+}
+
 func TestLibraryServerUsesExternalListener(t *testing.T) {
 	dir := t.TempDir()
 	certFile, keyFile, _ := writeSelfSignedCert(t, dir)
@@ -238,6 +307,21 @@ func waitStream(t *testing.T, server *Server, endpoint string) net.Conn {
 			t.Fatalf("wait stream: %v", err)
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func waitPassiveLatency(t *testing.T, server *Server, endpoint string) PassiveLatencyObservation {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		observation := server.PassiveLatencyObservation(endpoint, time.Now())
+		if observation.State == PassiveLatencyOK {
+			return observation
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("wait latency: %#v", observation)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 

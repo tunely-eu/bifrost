@@ -48,6 +48,14 @@ Important limits include:
 
 Bifrost metrics use endpoint keys and controlled reason/direction values only. Tokens, remote addresses, application paths, and SNI names are not used as metric labels.
 
+## Passive Latency Data
+
+Passive latency observations are endpoint-keyed mux/session control metadata.
+They do not include connector tokens, token hashes, TLS private keys, hello
+header values, remote addresses, SNI names, route hostnames, application paths,
+HTTP headers, cookies, bodies, content types, payload excerpts, or participant
+identifiers.
+
 ## Known Non-Goals
 
 Bifrost does not defend against volumetric DDoS.

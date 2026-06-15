@@ -55,3 +55,14 @@ This keeps reconnect behavior reviewable in configuration or provider output ins
 The provider returns Bifrost's native admission decision. The tunnel core still validates listener specs and applies guardrails after every decision, so product-specific policy cannot silently expand beyond configured runtime ceilings.
 
 Metrics and logging are intentionally narrow internal interfaces. The runtime emits typed observer events for readiness, sessions, streams, rejects, and copied bytes. The standalone binaries aggregate those events for the optional admin `/metrics` endpoint, while embedded users can attach their own observer without changing the transport contract.
+
+## Passive Latency
+
+The relay also keeps endpoint-keyed passive latency state for accepted sessions.
+This state is derived from Bifrost-owned mux/session control traffic, not from
+application payloads or target response times. Embedders can read the latest
+state as `endpoint_key`, `latency_ms`, `observed_at`, and `state` values where
+`state` is one of `ok`, `unknown`, or `stale`.
+
+See [Passive Latency Observations](passive-latency.md) for the source,
+freshness, and forbidden-data contract.

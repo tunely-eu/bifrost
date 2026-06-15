@@ -12,6 +12,7 @@ type Config struct {
 	MaxStreams        int
 	KeepAliveInterval time.Duration
 	KeepAliveTimeout  time.Duration
+	LatencyObserver   func(time.Duration, time.Time)
 }
 
 type Session interface {
@@ -30,7 +31,12 @@ func Client(conn net.Conn, maxStreams int) (Session, error) {
 }
 
 func ServerWithConfig(conn net.Conn, cfg Config) (Session, error) {
-	return yamux.Server(conn, yamuxConfig(cfg))
+	session, err := yamux.Server(conn, yamuxConfig(cfg))
+	if err != nil {
+		return nil, err
+	}
+	startObservedKeepalive(session, cfg)
+	return session, nil
 }
 
 func ClientWithConfig(conn net.Conn, cfg Config) (Session, error) {
@@ -50,5 +56,36 @@ func yamuxConfig(options Config) *yamux.Config {
 	if options.KeepAliveTimeout > 0 {
 		cfg.ConnectionWriteTimeout = options.KeepAliveTimeout
 	}
+	if options.LatencyObserver != nil {
+		cfg.EnableKeepAlive = false
+	}
 	return cfg
+}
+
+func startObservedKeepalive(session *yamux.Session, cfg Config) {
+	if cfg.LatencyObserver == nil {
+		return
+	}
+	interval := cfg.KeepAliveInterval
+	if interval <= 0 {
+		interval = yamux.DefaultConfig().KeepAliveInterval
+	}
+	go func() {
+		timer := time.NewTimer(interval)
+		defer timer.Stop()
+		for {
+			select {
+			case <-timer.C:
+				rtt, err := session.Ping()
+				if err != nil {
+					_ = session.Close()
+					return
+				}
+				cfg.LatencyObserver(rtt, time.Now().UTC())
+				timer.Reset(interval)
+			case <-session.CloseChan():
+				return
+			}
+		}
+	}()
 }

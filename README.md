@@ -38,6 +38,7 @@ Bifrost is intentionally narrow: it moves byte streams from a relay listener to 
 | Reconnects should be predictable | Endpoint ownership is explicit: reject, replace, or allow parallel sessions. |
 | Small networks still need guardrails | Sessions, streams, bandwidth, idle time, headers, and metrics are bounded. |
 | Existing observability should keep working | Optional Prometheus metrics expose sessions, streams, rejects, and bytes. |
+| Need tunnel latency without app probes | Embedders can read endpoint-keyed passive mux/session latency state. |
 
 ## Project Shape
 
@@ -49,6 +50,11 @@ Bifrost is the generic tunnel runtime:
 - The Go library exposes an `AcceptProvider` interface for embedded products and integrations.
 
 For Caddy-native deployments, see [`caddy-bifrost`](https://github.com/tunely-eu/caddy-bifrost). It embeds Bifrost as a Caddy app, adds a `reverse_proxy` transport, and supports SNI passthrough with listener wrappers.
+
+Passive latency observations are documented in
+[`docs/passive-latency.md`](docs/passive-latency.md). They are keyed by
+`endpoint_key` and contain only latency milliseconds, observation time, and a
+controlled state.
 
 ## How It Works
 

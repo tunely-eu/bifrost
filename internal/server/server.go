@@ -13,6 +13,7 @@ import (
 	"github.com/tunely-eu/bifrost/internal/acceptor"
 	"github.com/tunely-eu/bifrost/internal/config"
 	"github.com/tunely-eu/bifrost/internal/header"
+	"github.com/tunely-eu/bifrost/internal/latency"
 	"github.com/tunely-eu/bifrost/internal/limits"
 	"github.com/tunely-eu/bifrost/internal/listener"
 	"github.com/tunely-eu/bifrost/internal/logging"
@@ -24,22 +25,25 @@ import (
 )
 
 type Options struct {
-	Logger         *slog.Logger
-	Observer       metrics.Observer
-	AcceptProvider acceptor.Provider
-	TLSConfig      *tls.Config
-	Listener       net.Listener
-	Ready          func(net.Addr)
-	AdminReady     func(net.Addr)
-	ListenerReady  func(endpointKey string, spec listener.Spec, addr net.Addr)
+	Logger          *slog.Logger
+	Observer        metrics.Observer
+	LatencyObserver latency.Observer
+	AcceptProvider  acceptor.Provider
+	TLSConfig       *tls.Config
+	Listener        net.Listener
+	Ready           func(net.Addr)
+	AdminReady      func(net.Addr)
+	ListenerReady   func(endpointKey string, spec listener.Spec, addr net.Addr)
 }
 
 type Server struct {
-	cfg      config.ServerConfig
-	opts     Options
-	logger   *slog.Logger
-	observer metrics.Observer
-	accept   acceptor.Provider
+	cfg             config.ServerConfig
+	opts            Options
+	logger          *slog.Logger
+	observer        metrics.Observer
+	latency         *latency.Store
+	latencyObserver latency.Observer
+	accept          acceptor.Provider
 
 	mu       sync.Mutex
 	wg       sync.WaitGroup
@@ -106,13 +110,16 @@ func New(cfg config.ServerConfig, opts Options) (*Server, error) {
 			return nil, err
 		}
 	}
+	latencyStore := latency.NewStore(defaultLatencyStaleAfter(cfg))
 	return &Server{
-		cfg:      cfg,
-		opts:     opts,
-		logger:   logger,
-		observer: observer,
-		accept:   provider,
-		sessions: make(map[string][]*managedSession),
+		cfg:             cfg,
+		opts:            opts,
+		logger:          logger,
+		observer:        observer,
+		latency:         latencyStore,
+		latencyObserver: latency.NewMulti(latencyStore, opts.LatencyObserver),
+		accept:          provider,
+		sessions:        make(map[string][]*managedSession),
 	}, nil
 }
 
@@ -331,6 +338,11 @@ func (s *Server) handleTunnel(parent context.Context, raw net.Conn, tlsConfig *t
 		MaxStreams:        decision.Limits.MaxStreams,
 		KeepAliveInterval: s.cfg.Runtime.TunnelKeepAliveInterval.Duration,
 		KeepAliveTimeout:  s.cfg.Runtime.TunnelKeepAliveTimeout.Duration,
+		LatencyObserver: func(value time.Duration, observedAt time.Time) {
+			if s.latencyObserver != nil {
+				s.latencyObserver.ObserveLatency(decision.EndpointKey, value, observedAt)
+			}
+		},
 	})
 	if err != nil {
 		s.logger.Warn("start yamux server failed", "endpoint_key", decision.EndpointKey, "error", err)
@@ -478,6 +490,14 @@ func (s *Server) OpenStream(ctx context.Context, endpointKey string) (net.Conn, 
 	return s.openStream(ctx, session)
 }
 
+func (s *Server) LatencyObservation(endpointKey string, now time.Time) latency.Observation {
+	return s.latency.LatencyObservation(endpointKey, now)
+}
+
+func (s *Server) LatencySnapshot(now time.Time) []latency.Observation {
+	return s.latency.LatencySnapshot(now)
+}
+
 func (s *Server) sessionForEndpoint(endpointKey string) (*managedSession, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -620,4 +640,16 @@ func waitDone(ctx context.Context, done <-chan struct{}) {
 	case <-done:
 	case <-ctx.Done():
 	}
+}
+
+func defaultLatencyStaleAfter(cfg config.ServerConfig) time.Duration {
+	interval := cfg.Runtime.TunnelKeepAliveInterval.Duration
+	timeout := cfg.Runtime.TunnelKeepAliveTimeout.Duration
+	if interval <= 0 {
+		interval = 30 * time.Second
+	}
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+	return 2*interval + timeout
 }
