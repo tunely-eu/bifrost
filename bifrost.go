@@ -324,6 +324,22 @@ func (s *Server) ProxyStream(ctx context.Context, endpointKey string, ingressCon
 	return s.inner.ProxyStream(ctx, endpointKey, ingressConn)
 }
 
+// ProxyStreamOptions configures one server-side proxied stream.
+type ProxyStreamOptions struct {
+	// Observer receives byte-count and end events for this proxied stream in
+	// addition to the server's configured endpoint observer.
+	Observer StreamObserver
+}
+
+// ProxyStreamWithOptions attaches ingressConn to a new stream for endpointKey
+// and copies bytes in both directions until either side closes or ctx is
+// canceled.
+func (s *Server) ProxyStreamWithOptions(ctx context.Context, endpointKey string, ingressConn net.Conn, opts ProxyStreamOptions) error {
+	return s.inner.ProxyStreamWithOptions(ctx, endpointKey, ingressConn, server.ProxyStreamOptions{
+		Observer: opts.Observer,
+	})
+}
+
 // PassiveLatencyObservation returns the latest passive latency state for
 // endpointKey. Unknown is returned when no observation exists.
 func (s *Server) PassiveLatencyObservation(endpointKey string, now time.Time) PassiveLatencyObservation {

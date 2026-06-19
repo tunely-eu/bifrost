@@ -452,23 +452,31 @@ func (s *Server) acceptIngress(ctx context.Context, session *managedSession) {
 }
 
 func (s *Server) forwardIngress(ctx context.Context, session *managedSession, ingressConn net.Conn) {
-	if err := s.proxySessionStream(ctx, session, ingressConn); err != nil {
+	if err := s.proxySessionStream(ctx, session, ingressConn, ProxyStreamOptions{}); err != nil {
 		s.logger.Warn("proxy ingress stream failed", "endpoint_key", session.endpointKey, "error", err)
 	}
 }
 
+type ProxyStreamOptions struct {
+	Observer metrics.StreamObserver
+}
+
 func (s *Server) ProxyStream(ctx context.Context, endpointKey string, ingressConn net.Conn) error {
+	return s.ProxyStreamWithOptions(ctx, endpointKey, ingressConn, ProxyStreamOptions{})
+}
+
+func (s *Server) ProxyStreamWithOptions(ctx context.Context, endpointKey string, ingressConn net.Conn, opts ProxyStreamOptions) error {
 	session, err := s.sessionForEndpoint(endpointKey)
 	if err != nil {
 		s.observer.StreamRejected(endpointKey, metrics.RejectNoSession)
 		_ = ingressConn.Close()
 		return err
 	}
-	return s.proxySessionStream(ctx, session, ingressConn)
+	return s.proxySessionStream(ctx, session, ingressConn, opts)
 }
 
-func (s *Server) proxySessionStream(ctx context.Context, session *managedSession, ingressConn net.Conn) error {
-	stream, err := s.openStream(ctx, session)
+func (s *Server) proxySessionStream(ctx context.Context, session *managedSession, ingressConn net.Conn, opts ProxyStreamOptions) error {
+	stream, err := s.openStream(ctx, session, opts.Observer)
 	if err != nil {
 		_ = ingressConn.Close()
 		return err
@@ -487,7 +495,7 @@ func (s *Server) OpenStream(ctx context.Context, endpointKey string) (net.Conn, 
 		s.observer.StreamRejected(endpointKey, metrics.RejectNoSession)
 		return nil, err
 	}
-	return s.openStream(ctx, session)
+	return s.openStream(ctx, session, nil)
 }
 
 func (s *Server) LatencyObservation(endpointKey string, now time.Time) latency.Observation {
@@ -508,7 +516,7 @@ func (s *Server) sessionForEndpoint(endpointKey string) (*managedSession, error)
 	return sessions[len(sessions)-1], nil
 }
 
-func (s *Server) openStream(ctx context.Context, session *managedSession) (*managedStream, error) {
+func (s *Server) openStream(ctx context.Context, session *managedSession, observer metrics.StreamObserver) (*managedStream, error) {
 	mux, err := session.waitMux(ctx)
 	if err != nil {
 		s.observer.StreamRejected(session.endpointKey, metrics.RejectSessionNotReady)
@@ -528,11 +536,40 @@ func (s *Server) openStream(ctx context.Context, session *managedSession) (*mana
 	if streamObserver == nil {
 		streamObserver = metrics.NoopStream{}
 	}
+	streamObserver = combineStreamObservers(streamObserver, observer)
 	return &managedStream{
 		Conn:     stream,
 		observer: streamObserver,
 		release:  session.releaseStream,
 	}, nil
+}
+
+func combineStreamObservers(primary metrics.StreamObserver, extra metrics.StreamObserver) metrics.StreamObserver {
+	if primary == nil {
+		primary = metrics.NoopStream{}
+	}
+	if extra == nil {
+		return primary
+	}
+	return combinedStreamObserver{primary, extra}
+}
+
+type combinedStreamObserver []metrics.StreamObserver
+
+func (o combinedStreamObserver) AddBytes(direction metrics.Direction, n int64) {
+	for _, observer := range o {
+		if observer != nil {
+			observer.AddBytes(direction, n)
+		}
+	}
+}
+
+func (o combinedStreamObserver) End() {
+	for _, observer := range o {
+		if observer != nil {
+			observer.End()
+		}
+	}
 }
 
 type managedStream struct {
